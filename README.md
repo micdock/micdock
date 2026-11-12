@@ -125,8 +125,13 @@ of `rodego2 list` and `rodego2 --dev /dev/hidrawN scan` (read-only).
 command (`'Q' 01`) erased the recordings of two transmitters during development; see [PROTOCOL.md](PROTOCOL.md).
 New settings are found by changing them on the unit itself and comparing read-only scans before and after.
 
-Before sending code: `cargo fmt`, `cargo clippy --all-targets` (no warnings) and `cargo test` in `src/`; CI runs
-the same on every push and pull request, on x86-64 and ARM64. The tests need no hardware: they use synthetic
+Before sending code, run the same checks as CI locally: `scripts/check.sh` (formatting, clippy without warnings,
+all tests; `--quick` skips the tests). `scripts/install-hooks.sh` makes `git push` run it automatically.
+
+CI runs on pull requests (required before merging into `main`), on `main` and on release tags, for x86-64 and
+ARM64 — not on every branch push. A newer push to a pull request cancels the older run, and a pull request that
+only changes documentation skips the build. To build a branch without a pull request: Actions → build →
+*Run workflow*. The tests need no hardware: they use synthetic
 recordings (`micdock_core::testdata`, laid out like the transmitter writes them), run the command-line tools as a
 user would, and simulate the firmware installer. A few tests use real hardware and only run on request:
 
