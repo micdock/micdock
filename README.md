@@ -20,8 +20,9 @@ Wireless GO are trademarks of their owner and are used here only to name the har
 
 ## Download
 
-Ready-made builds for x86-64 Linux are on the [releases page](https://github.com/micdock/micdock/releases):
-unpack `micdock-<version>-x86_64-linux.tar.gz` and run `./install.sh` (for your user; it prints the one `sudo`
+Ready-made builds for Linux on x86-64 and 64-bit ARM (glibc 2.34 or newer: Ubuntu 22.04+, Debian 12+, Fedora,
+RHEL/Alma/Rocky 9+, openSUSE, Arch, …) are on the [releases page](https://github.com/micdock/micdock/releases):
+unpack `micdock-<version>-<x86_64 or aarch64>-linux.tar.gz` and run `./install.sh` (for your user; it prints the one `sudo`
 command for the udev rule) or `sudo ./install.sh --system` (for everyone). `./install.sh --remove` uninstalls.
 What changed: [CHANGELOG.md](CHANGELOG.md).
 

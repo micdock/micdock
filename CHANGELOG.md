@@ -18,4 +18,4 @@ MicDock manages a RØDE Wireless GO II on Linux, without RØDE's software.
 
 Known limitations: the firmware installer has updated units during development, but this version's installer
 has not yet run on hardware; LED brightness, the safety channel and editing camera presets are not available.
-Tested on Pop!_OS 24.04 (COSMIC) with firmware 2.5.0.
+Builds for x86-64 and 64-bit ARM Linux (glibc 2.34 or newer). Tested on Pop!_OS 24.04 (COSMIC) with firmware 2.5.0.

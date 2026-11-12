@@ -1,5 +1,9 @@
 # Build and check MicDock on every push and pull request; on a version tag (v1.2.3) also publish a
-# GitHub release with the Linux archive.
+# GitHub release with the Linux archives.
+#
+# The builds run inside AlmaLinux 9 (glibc 2.34), so the binaries also start on older distributions:
+# everything with glibc 2.34 or newer (Ubuntu 22.04+, Debian 12+, RHEL/Alma/Rocky 9+, Fedora 35+,
+# openSUSE Leap 15.6, Arch, …). A binary built against a newer glibc would refuse to start there.
 name: build
 
 on:
@@ -14,17 +18,25 @@ permissions:
 
 jobs:
   build:
-    runs-on: ubuntu-24.04
-    defaults:
-      run:
-        working-directory: src
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-24.04
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    container: almalinux:9
+    env:
+      CARGO_TERM_COLOR: always
     steps:
-      - uses: actions/checkout@v4
-
       - name: System packages
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends pkg-config libasound2-dev libxkbcommon-dev
+          dnf -y install --enablerepo=crb gcc make pkgconf-pkg-config alsa-lib-devel libxkbcommon-devel git
+          git config --global --add safe.directory '*'
+
+      - uses: actions/checkout@v4
 
       - name: Rust
         uses: dtolnay/rust-toolchain@stable
@@ -34,21 +46,27 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src
+          key: ${{ matrix.arch }}
 
       - name: Formatting
+        if: matrix.arch == 'x86_64'
+        working-directory: src
         run: cargo fmt --all --check
 
       - name: Clippy
-        run: cargo clippy --release --all-targets -- -D warnings
+        if: matrix.arch == 'x86_64'
+        working-directory: src
+        run: cargo clippy --release --locked --all-targets -- -D warnings
 
       - name: Tests
-        run: cargo test --release
+        working-directory: src
+        run: cargo test --release --locked
 
       - name: Build
-        run: cargo build --release
+        working-directory: src
+        run: cargo build --release --locked
 
       - name: Archive
-        working-directory: .
         run: |
           version="${GITHUB_REF_NAME#v}"
           case "$GITHUB_REF" in refs/tags/v*) ;; *) version="$(git rev-parse --short HEAD)" ;; esac
@@ -56,7 +74,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: micdock-linux-x86_64
+          name: micdock-linux-${{ matrix.arch }}
           path: dist/micdock-*
 
   release:
@@ -70,7 +88,8 @@ jobs:
 
       - uses: actions/download-artifact@v4
         with:
-          name: micdock-linux-x86_64
+          pattern: micdock-linux-*
+          merge-multiple: true
           path: dist
 
       - name: Release notes from CHANGELOG.md
@@ -79,11 +98,14 @@ jobs:
           awk -v v="$version" '/^## /{p = index($0, "## " v) == 1; next} p' CHANGELOG.md > notes.md
           cat >> notes.md <<'EOF'
 
-          ### Install
+          ### Download and install
 
-          Download `micdock-*-x86_64-linux.tar.gz`, unpack it and run `./install.sh` (for your user) or
-          `sudo ./install.sh --system` (for everyone, including the udev rule). Needs a desktop with Wayland or X11;
-          `ffmpeg` for MP3 export and `udisks2` for the transmitters' drives.
+          - `micdock-*-x86_64-linux.tar.gz` for Intel/AMD PCs, `micdock-*-aarch64-linux.tar.gz` for 64-bit ARM.
+          - Runs on Linux with glibc 2.34 or newer (Ubuntu 22.04+, Debian 12+, Fedora, RHEL/Alma/Rocky 9+,
+            openSUSE, Arch, …), on Wayland or X11.
+          - Unpack it and run `./install.sh` (for your user; it prints the `sudo` command for the udev rule) or
+            `sudo ./install.sh --system` (for everyone). `ffmpeg` is needed for MP3 export, `udisks2` for the
+            transmitters' drives.
           EOF
 
       - name: Publish
