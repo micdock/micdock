@@ -125,7 +125,15 @@ of `rodego2 list` and `rodego2 --dev /dev/hidrawN scan` (read-only).
 command (`'Q' 01`) erased the recordings of two transmitters during development; see [PROTOCOL.md](PROTOCOL.md).
 New settings are found by changing them on the unit itself and comparing read-only scans before and after.
 
-Before sending code: `cargo fmt`, `cargo clippy --all-targets` (no warnings) and `cargo test` in `src/`.
+Before sending code: `cargo fmt`, `cargo clippy --all-targets` (no warnings) and `cargo test` in `src/`; CI runs
+the same on every push and pull request, on x86-64 and ARM64. The tests need no hardware: they use synthetic
+recordings (`micdock_core::testdata`, laid out like the transmitter writes them), run the command-line tools as a
+user would, and simulate the firmware installer. A few tests use real hardware and only run on request:
+
+```bash
+cargo test -- --ignored                                   # player: plays a test tone
+MICDOCK_TEST_RX=<receiver serial> cargo test -- --ignored # records 2 s from a switched-on receiver
+```
 
 ## License
 

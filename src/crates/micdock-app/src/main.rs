@@ -1555,3 +1555,71 @@ impl cosmic::Application for App {
         .into()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn units(list: Vec<DeviceStatus>) -> BTreeMap<String, DeviceStatus> {
+        list.into_iter().map(|u| (u.serial.clone(), u)).collect()
+    }
+
+    #[test]
+    fn transmitter_power_states() {
+        let all = demo::units();
+        let (rx, tx1, tx2) = (all[0].clone(), all[1].clone(), all[2].clone());
+        // both linked to a switched-on receiver
+        let u = units(all.clone());
+        assert!(matches!(tx_power(&u, &tx1), Power::On(l) if l.slot == 1));
+        assert!(matches!(tx_power(&u, &tx2), Power::On(l) if l.slot == 2));
+        // TX2 not linked while TX1 is: TX2 is off (the receiver is evidently on)
+        let mut rx_one = rx.clone();
+        rx_one.links.retain(|l| l.slot == 1);
+        let u = units(vec![rx_one, tx1.clone(), tx2.clone()]);
+        assert!(matches!(tx_power(&u, &tx2), Power::NotLinked));
+        // nothing linked: can't tell which one is off
+        let mut rx_none = rx.clone();
+        rx_none.links.clear();
+        let u = units(vec![rx_none.clone(), tx1.clone()]);
+        assert!(matches!(tx_power(&u, &tx1), Power::NoLinks));
+        // the receiver is switched off (no sound card)
+        let mut rx_off = rx_none;
+        rx_off.powered = Some(false);
+        let u = units(vec![rx_off, tx1.clone()]);
+        assert!(matches!(tx_power(&u, &tx1), Power::RxOff));
+        // no receiver, or the TX is a USB drive
+        assert!(matches!(
+            tx_power(&units(vec![tx1.clone()]), &tx1),
+            Power::Unknown
+        ));
+        let mut drive = tx1.clone();
+        drive.storage = true;
+        assert!(matches!(tx_power(&units(all), &drive), Power::Storage));
+    }
+
+    #[test]
+    fn home_folder() {
+        let home = std::env::var("HOME").unwrap_or_default();
+        assert_eq!(
+            expand_home("~/go2-recordings"),
+            format!("{home}/go2-recordings")
+        );
+        assert_eq!(expand_home("/data/rec"), "/data/rec");
+    }
+
+    #[test]
+    fn demo_data_is_consistent() {
+        let all = demo::units();
+        let rx = all.iter().find(|u| u.role == Role::Rx).unwrap();
+        for tx in all.iter().filter(|u| u.role == Role::Tx) {
+            assert!(
+                rx.links.iter().any(|l| l.serial == tx.serial),
+                "{} linked",
+                tx.serial
+            );
+        }
+        let s = demo::sessions();
+        assert_eq!(s.iter().map(Vec::len).collect::<Vec<_>>(), [3, 1, 1]);
+        assert_eq!(SHOTS.len(), 6);
+    }
+}

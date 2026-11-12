@@ -1091,3 +1091,76 @@ impl Recordings {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use micdock_core::testdata::{samples, write_ugg, write_wav};
+
+    #[test]
+    fn names() {
+        assert_eq!(stem("REC00051.WAV"), "REC00051");
+        assert_eq!(stem(".hidden"), ".hidden");
+        assert_eq!(mp3_preset_args(3), ["-b:a", "320k"]);
+        assert_eq!(
+            mp3_preset_args(99),
+            ["-q:a", "2"],
+            "unknown preset: the default"
+        );
+    }
+
+    #[test]
+    fn lists_a_drive_folder() {
+        let d = std::env::temp_dir().join(format!("micdock-app-rec-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        write_ugg(&d.join("REC00001.UGG"), 0, &samples(300, 1), 100.0);
+        write_ugg(&d.join("REC00002.UGG"), 300, &samples(300, 2), 200.0);
+        write_wav(&d.join("REC00003.WAV"), &samples(300, 3), &[], 300.0);
+        std::fs::write(d.join("PEA00001.EGG"), b"peaks").unwrap(); // not a recording
+        std::fs::write(d.join("REC00004.WAV"), b"broken").unwrap(); // a recording that can't be read
+        let (infos, bad) = load_folder(&d).unwrap();
+        assert_eq!(infos.len(), 3);
+        assert_eq!(bad.len(), 1);
+        assert!(bad[0].starts_with("REC00004.WAV"));
+        let sessions = rec::group_sessions(infos);
+        assert_eq!(session_name(&sessions[0]), "REC00001 – 00002");
+        assert_eq!(session_name(&sessions[1]), "REC00003");
+        std::fs::remove_dir_all(d).unwrap();
+    }
+
+    /// Dates: files from a set clock (>= 2020) are real; older ones need the TX clock offset.
+    #[test]
+    fn recording_dates() {
+        let d = std::env::temp_dir().join(format!("micdock-app-dates-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let (new, old) = (d.join("REC00010.WAV"), d.join("REC00011.WAV"));
+        write_wav(&new, &samples(48000, 1), &[], 1_800_000_000.0);
+        write_wav(&old, &samples(48000, 1), &[], 1_000_000.0); // clock never set: early 1970/2000
+        let new = rec::open_recording(&new).unwrap();
+        let old = rec::open_recording(&old).unwrap();
+        let mut r = Recordings::default();
+        let mut cfg = Config::demo();
+        assert_eq!(
+            r.times(std::slice::from_ref(&new), &cfg),
+            Some((1_799_999_999.0, 1_800_000_000.0))
+        );
+        assert_eq!(
+            r.times(std::slice::from_ref(&old), &cfg),
+            None,
+            "no offset known yet"
+        );
+        cfg.set("legacy_offset", 500_000_000i64);
+        assert_eq!(
+            r.times(std::slice::from_ref(&old), &cfg),
+            Some((500_999_999.0, 501_000_000.0))
+        );
+        r.live_offset = Some(600_000_000); // a connected TX wins over the saved offset
+        assert_eq!(
+            r.times(std::slice::from_ref(&old), &cfg),
+            Some((600_999_999.0, 601_000_000.0))
+        );
+        std::fs::remove_dir_all(d).unwrap();
+    }
+}

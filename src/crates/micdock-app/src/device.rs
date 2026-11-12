@@ -828,3 +828,21 @@ fn install(serial: &str, unit: &str, dir: PathBuf, send: &dyn Fn(DevMsg)) -> Dev
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn names_fit_the_device_field() {
+        assert_eq!(fit_name("Presenter"), "Presenter");
+        assert_eq!(
+            fit_name("A very long transmitter name"),
+            "A very long transmitt"
+        ); // 21 bytes
+           // never cut inside a character: "ø" is 2 bytes
+        let n = fit_name("øøøøøøøøøøøø");
+        assert!(n.len() <= NAME_MAX && n.chars().all(|c| c == 'ø'));
+        assert_eq!(n.chars().count(), 10);
+    }
+}

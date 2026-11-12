@@ -63,7 +63,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn formats_like_python() {
+    fn formats_durations_and_sizes() {
         assert_eq!(fmt_dur(83.2), "1:23");
         assert_eq!(fmt_dur(10142.0), "2:49:02");
         assert_eq!(fmt_size(500), "500 B");

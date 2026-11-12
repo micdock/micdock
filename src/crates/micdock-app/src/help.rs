@@ -95,6 +95,11 @@ fn languages() -> Vec<String> {
         .filter_map(|v| std::env::var(v).ok())
         .find(|v| !v.is_empty())
         .unwrap_or_default();
+    parse_languages(&raw)
+}
+
+/// "nl_NL.UTF-8:de" → ["nl_NL", "nl", "de", "en"].
+fn parse_languages(raw: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for item in raw.split(':') {
         let code = item
@@ -186,7 +191,11 @@ fn split_markdown(text: &str) -> Vec<(String, Vec<String>, String)> {
 }
 
 fn load_manual() -> Result<Book, String> {
-    let path = find_manual().ok_or("The MicDock manual is not installed.")?;
+    load_manual_at(&find_manual().ok_or("The MicDock manual is not installed.")?)
+}
+
+fn load_manual_at(path: &Path) -> Result<Book, String> {
+    let path = path.to_path_buf();
     let text = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
     let chapters = split_markdown(&text)
         .into_iter()
@@ -602,6 +611,44 @@ impl Help {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn language_lists() {
+        assert_eq!(
+            parse_languages("nl_NL.UTF-8:de"),
+            ["nl_NL", "nl", "de", "en"]
+        );
+        assert_eq!(parse_languages("C.UTF-8"), ["en"]);
+        assert_eq!(parse_languages(""), ["en"]);
+        assert_eq!(parse_languages("sr_RS@latin"), ["sr_RS", "sr", "en"]);
+    }
+
+    /// The bundled manual is found from the source checkout and split into chapters with link targets.
+    #[test]
+    fn the_manual_loads() {
+        // the manual in this repository (not via the binary's location: the build folder may be elsewhere)
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../docs/en/manual.md");
+        let book = load_manual_at(&path).expect("docs/en/manual.md");
+        assert!(book.chapters.len() >= 10);
+        assert!(book
+            .chapters
+            .iter()
+            .any(|c| c.anchors.iter().any(|a| a == "deleting-recordings")));
+        assert!(
+            book.base.join("img/recordings.png").is_file(),
+            "screenshots next to the manual"
+        );
+        // every link inside the manual points to a heading that exists
+        let text = std::fs::read_to_string(book.base.join("manual.md")).unwrap();
+        let anchors: Vec<&String> = book.chapters.iter().flat_map(|c| &c.anchors).collect();
+        for part in text.split("](#").skip(1) {
+            let target = &part[..part.find(')').unwrap()];
+            assert!(
+                anchors.iter().any(|a| *a == target),
+                "broken link #{target}"
+            );
+        }
+    }
 
     #[test]
     fn slugs_and_chapters() {
