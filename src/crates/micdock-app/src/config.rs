@@ -81,3 +81,21 @@ impl Config {
         self.save();
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn demo_settings_have_defaults_and_are_never_saved() {
+        let mut c = Config::demo();
+        assert_eq!(c.str("format"), "wav");
+        assert!(c.bool("join"));
+        assert_eq!(c.int("mp3_preset"), Some(1));
+        assert_eq!(c.int("legacy_offset"), None);
+        assert_eq!(c.str("export_dir"), "~/go2-recordings");
+        c.set("format", "mp3"); // must not write ~/.config/micdock/config.json
+        assert_eq!(c.str("format"), "mp3");
+        assert!(!c.1);
+    }
+}

@@ -6,6 +6,7 @@
 //! on a unit. The units are polled every few seconds and listed in the navigation sidebar.
 
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 use std::time::Duration;
 
 use cosmic::app::{Settings, Task};
@@ -22,6 +23,7 @@ mod config;
 mod demo;
 mod device;
 mod help;
+mod live;
 mod player;
 mod recordings;
 mod util;
@@ -63,6 +65,8 @@ fn main() -> cosmic::iced::Result {
 enum Tab {
     Audio,
     Recordings,
+    /// The receiver's live audio: meters, spectrum, recording.
+    Live,
     Device,
 }
 
@@ -95,6 +99,13 @@ pub enum Message {
     Shot(usize),
     ShotCapture(usize),
     ShotTaken(usize, iced::window::Screenshot),
+    /// Redraw the live meters.
+    LiveTick,
+    LiveRecord,
+    LiveStop,
+    /// Spectrum: 0 = both, 1 = left, 2 = right.
+    LiveView(usize),
+    LivePeaks(bool),
     /// The window's close button, Alt+F4, the compositor…
     Quit,
     /// Quit even though an export is running (it is cancelled).
@@ -130,6 +141,12 @@ struct App {
     /// Quit as soon as the cancelled export has stopped.
     quitting: bool,
     help: Help,
+    /// The receiver's live audio (serial, capture), while its Live tab is open or it records.
+    live: Option<(String, live::Live)>,
+    live_status: Option<String>,
+    /// The dB values shown next to the level meters, updated 4× a second (calmer to read than 20×).
+    live_text: [String; live::CHANNELS],
+    live_text_at: std::time::Instant,
     /// Demo mode: made-up units, no device access, no network.
     demo: bool,
     about: widget::about::About,
@@ -153,8 +170,10 @@ fn to_top(id: &widget::Id) -> Task<Message> {
 fn fingerprint() -> String {
     let mut out = String::new();
     for d in micdock_core::hid::find_devices() {
-        let storage = devices::in_storage_mode(&devices::usb_dir(&d.node));
-        out.push_str(&format!("{} {:04x} {storage};", d.node, d.pid));
+        let udir = devices::usb_dir(&d.node);
+        let storage = devices::in_storage_mode(&udir);
+        let audio = devices::has_audio_interface(&udir); // the receiver switched on or off
+        out.push_str(&format!("{} {:04x} {storage} {audio};", d.node, d.pid));
     }
     for (serial, (_, mount)) in devices::tx_mounts() {
         out.push_str(&format!("{serial}@{mount};"));
@@ -286,6 +305,8 @@ enum Power<'a> {
     Storage,
     /// No receiver on USB to ask.
     Unknown,
+    /// The receiver is switched off, so it can't tell.
+    RxOff,
 }
 
 fn tx_power<'a>(units: &'a BTreeMap<String, DeviceStatus>, tx: &DeviceStatus) -> Power<'a> {
@@ -299,6 +320,11 @@ fn tx_power<'a>(units: &'a BTreeMap<String, DeviceStatus>, tx: &DeviceStatus) ->
     if rxs.peek().is_none() {
         return Power::Unknown;
     }
+    let rxs: Vec<&DeviceStatus> = rxs.collect();
+    if rxs.iter().all(|rx| rx.powered == Some(false)) {
+        return Power::RxOff;
+    }
+    let rxs = rxs.into_iter();
     let links: Vec<&TxLink> = rxs.flat_map(|rx| rx.links.iter()).collect();
     match links.iter().find(|l| l.serial == tx.serial) {
         Some(l) => Power::On(l),
@@ -308,11 +334,12 @@ fn tx_power<'a>(units: &'a BTreeMap<String, DeviceStatus>, tx: &DeviceStatus) ->
 }
 
 /// The screenshots for the manual: (file name, what to show).
-const SHOTS: [(&str, Shot); 5] = [
+const SHOTS: [(&str, Shot); 6] = [
     ("tx-audio", Shot::Unit(demo::TX1, 0)),
     ("recordings", Shot::Unit(demo::TX1, 1)),
     ("device", Shot::Unit(demo::TX1, 2)),
     ("rx-audio", Shot::Unit(demo::RX, 0)),
+    ("rx-live", Shot::Unit(demo::RX, 1)),
     ("help", Shot::Help("#on-board-recording")),
 ];
 
@@ -338,7 +365,279 @@ fn save_png(path: &std::path::Path, shot: &iced::window::Screenshot) -> std::io:
     Ok(())
 }
 
+/// `~/x` → `$HOME/x`.
+fn expand_home(p: &str) -> String {
+    match p.strip_prefix("~/") {
+        Some(rest) => format!("{}/{rest}", std::env::var("HOME").unwrap_or_default()),
+        None => p.to_string(),
+    }
+}
+
 impl App {
+    /// Start the live capture while a switched-on receiver's Live tab is shown, and stop it otherwise
+    /// (unless it is recording).
+    fn sync_live(&mut self) {
+        if self.demo {
+            let on_live = self.selected().is_some_and(|u| u.role == Role::Rx)
+                && !self.help.open
+                && self.tab(Role::Rx) == Tab::Live;
+            match (on_live, self.live.is_some()) {
+                (true, false) => self.live = Some((demo::RX.to_string(), live::Live::demo())),
+                (false, true) => self.live = None,
+                _ => {}
+            }
+            return;
+        }
+        let want = self.selected().filter(|u| {
+            u.role == Role::Rx
+                && u.powered == Some(true)
+                && !self.help.open
+                && self.tab(Role::Rx) == Tab::Live
+        });
+        let recording = self.live.as_ref().is_some_and(|(_, l)| l.recording());
+        match (want.map(|u| u.serial.clone()), &self.live) {
+            (Some(serial), Some((s, _))) if *s == serial => {}
+            (_, Some(_)) if recording => {}
+            (Some(serial), _) => {
+                self.live = None;
+                match live::find_source(&serial) {
+                    Some(src) => match live::Live::start(&src) {
+                        Ok(l) => {
+                            self.live = Some((serial, l));
+                            self.live_status = None;
+                        }
+                        Err(e) => self.live_status = Some(e),
+                    },
+                    None => {
+                        self.live_status = Some(
+                            "The receiver's sound card isn't available in the sound server (PipeWire or PulseAudio).".into(),
+                        )
+                    }
+                }
+            }
+            (None, _) => self.live = None,
+        }
+    }
+
+    /// The receiver's Live tab: level meters, spectrum and recording.
+    fn live_page(&self, u: &DeviceStatus) -> Element<'_, Message> {
+        let space = cosmic::theme::spacing();
+        let mut col = widget::column::with_capacity(6).spacing(space.space_m);
+        if u.powered == Some(false) {
+            return col
+                .push(widget::text::body(
+                    "Switch the receiver on: it is a USB sound card only while it is on.",
+                ))
+                .into();
+        }
+        let live = self
+            .live
+            .as_ref()
+            .filter(|(s, _)| *s == u.serial)
+            .map(|(_, l)| l);
+        let Some(l) = live else {
+            let text = self
+                .live_status
+                .clone()
+                .unwrap_or_else(|| "Starting…".into());
+            return col.push(widget::text::body(text)).into();
+        };
+        let m = l.meters();
+        let names = match u.channel {
+            Some(ChannelMode::Split) => ["Left (TX1)", "Right (TX2)"],
+            _ => ["Left", "Right"],
+        };
+        // level meters
+        let mut meters = settings::section().title("Level");
+        // a bar in the accent colour on a dark track, with a marker at the held peak
+        let fill = |alpha: f32| {
+            cosmic::theme::Container::custom(move |t: &cosmic::Theme| {
+                let mut c: cosmic::iced::Color = t.cosmic().accent_color().into();
+                c.a = alpha;
+                cosmic::iced::widget::container::Style {
+                    background: Some(c.into()),
+                    border: cosmic::iced::border::rounded(2),
+                    ..Default::default()
+                }
+            })
+        };
+        const W: f32 = 220.0;
+        for (c, name) in names.iter().enumerate() {
+            let pos = |db: f32| ((db - live::FLOOR) / -live::FLOOR).clamp(0.0, 1.0) * W;
+            let level = pos(m.level[c]);
+            let peak = pos(m.peak[c]).max(level);
+            let text = self.live_text[c].clone();
+            let mut bar = widget::row::with_capacity(4)
+                .height(Length::Fixed(8.0))
+                .push(
+                    widget::container(widget::Space::new())
+                        .width(Length::Fixed(level.max(1.0)))
+                        .height(Length::Fill)
+                        .class(fill(1.0)),
+                );
+            if peak > level + 3.0 {
+                bar = bar
+                    .push(
+                        widget::container(widget::Space::new())
+                            .width(Length::Fixed(peak - level - 2.0))
+                            .height(Length::Fill)
+                            .class(fill(0.15)),
+                    )
+                    .push(
+                        widget::container(widget::Space::new())
+                            .width(Length::Fixed(2.0))
+                            .height(Length::Fill)
+                            .class(fill(1.0)),
+                    );
+            }
+            let used = if peak > level + 3.0 {
+                peak
+            } else {
+                level.max(1.0)
+            };
+            bar = bar.push(
+                widget::container(widget::Space::new())
+                    .width(Length::Fixed((W - used).max(0.0)))
+                    .height(Length::Fill)
+                    .class(fill(0.15)),
+            );
+            meters = meters.add(settings::item(
+                *name,
+                widget::row::with_capacity(2)
+                    .spacing(space.space_s)
+                    .align_y(Alignment::Center)
+                    .push(bar)
+                    .push(widget::text::body(text).width(Length::Fixed(90.0))),
+            ));
+        }
+        col = col.push(meters);
+        // spectrum: per band one bar (both channels mixed, or one channel), or two (left and right, split mode)
+        let split = u.channel == Some(ChannelMode::Split);
+        let view = self.cfg.int("live_view").unwrap_or(0).clamp(0, 2) as usize;
+        let peaks = !self.cfg.bool("live_hide_peaks");
+        // (index into the spectra: 0 = mixed, 1 = left, 2 = right; opacity)
+        let series: Vec<(usize, f32)> = match view {
+            1 => vec![(1, 1.0)],
+            2 => vec![(2, 1.0)],
+            _ if split => vec![(1, 1.0), (2, 0.5)],
+            _ => vec![(0, 1.0)],
+        };
+        const H: f32 = 140.0;
+        let to_h = |db: f32| ((db + 90.0) / 80.0).clamp(0.0, 1.0) * (H - 4.0) + 2.0;
+        let accent = |alpha: f32| {
+            cosmic::theme::Container::custom(move |t: &cosmic::Theme| {
+                let mut c: cosmic::iced::Color = t.cosmic().accent_color().into();
+                c.a = alpha;
+                cosmic::iced::widget::container::Style {
+                    background: Some(c.into()),
+                    border: cosmic::iced::border::rounded(2),
+                    ..Default::default()
+                }
+            })
+        };
+        let mut bars = widget::row::with_capacity(live::BANDS)
+            .spacing(if series.len() > 1 { 6 } else { 3 })
+            .height(Length::Fixed(H));
+        for k in 0..live::BANDS {
+            let mut group = widget::row::with_capacity(series.len())
+                .spacing(1)
+                .width(Length::Fill);
+            for &(i, alpha) in &series {
+                let bar = to_h(m.bands[i].get(k).copied().unwrap_or(-90.0));
+                let top = to_h(m.tops[i].get(k).copied().unwrap_or(-90.0)).max(bar);
+                let mut col = widget::column::with_capacity(4)
+                    .width(Length::Fill)
+                    .height(Length::Fixed(H))
+                    .push(widget::Space::new().height(Length::Fill));
+                if peaks && top > bar + 3.0 {
+                    col = col
+                        .push(
+                            widget::container(widget::Space::new())
+                                .width(Length::Fill)
+                                .height(Length::Fixed(2.0))
+                                .class(accent(alpha.max(0.7))),
+                        )
+                        .push(widget::Space::new().height(Length::Fixed(top - bar - 2.0)));
+                }
+                col = col.push(
+                    widget::container(widget::Space::new())
+                        .width(Length::Fill)
+                        .height(Length::Fixed(bar))
+                        .class(accent(alpha)),
+                );
+                group = group.push(col);
+            }
+            bars = bars.push(group);
+        }
+        let both = if split {
+            "Both (side by side)"
+        } else {
+            "Both (mixed)"
+        };
+        let choices = vec![both, "Left (TX1)", "Right (TX2)"];
+        let legend = match (view, split) {
+            (0, true) => "Per band: left (TX1) dark, right (TX2) light.",
+            _ => "",
+        };
+        col = col.push(
+            settings::section()
+                .title("Spectrum")
+                .add(settings::item(
+                    "Channel",
+                    widget::dropdown(choices, Some(view), Message::LiveView),
+                ))
+                .add(settings::item(
+                    "Show peaks",
+                    widget::toggler(peaks).on_toggle(Message::LivePeaks),
+                ))
+                .add(bars)
+                .add(widget::text::caption(format!(
+                    "40 Hz … 20 kHz. {legend} Peak markers hold the highest level for 2 seconds: \
+                     outliers that reach the top need less gain (on the transmitter: the pad; on the camera: \
+                     a lower input level)."
+                ))),
+        );
+        // recording
+        let rec: Element<'_, Message> = match &m.recording {
+            Some((path, secs, bytes)) => widget::column::with_capacity(2)
+                .spacing(space.space_xs)
+                .push(
+                    widget::row::with_capacity(2)
+                        .spacing(space.space_s)
+                        .align_y(Alignment::Center)
+                        .push(
+                            widget::button::destructive("Stop recording")
+                                .on_press(Message::LiveStop),
+                        )
+                        .push(widget::text::body(format!(
+                            "● {}  ·  {}",
+                            util::fmt_dur(*secs),
+                            util::fmt_size(*bytes)
+                        ))),
+                )
+                .push(widget::text::caption(path.display().to_string()))
+                .into(),
+            None => widget::button::suggested("Record")
+                .on_press(Message::LiveRecord)
+                .into(),
+        };
+        col = col.push(
+            settings::section().title("Record what the receiver outputs").add(rec).add(widget::text::caption(
+                "Records the receiver's USB audio (48 kHz, 24-bit, stereo) as a WAV file in the export folder. \
+                 MicDock records through the sound server, so other programs can use the receiver at the same \
+                 time. The recording continues when you switch to another page.",
+            )),
+        );
+        if let Some(st) = m.error.as_ref().or(self.live_status.as_ref()) {
+            col = col.push(widget::text::caption(st.clone()));
+        }
+        col = col.push(widget::text::caption(format!(
+            "Sound server source: {}",
+            l.source
+        )));
+        col.into()
+    }
+
     /// Screenshot mode: show step `i`, wait for it to be drawn, then capture it; quit after the last.
     fn shot(&mut self, i: usize) -> Task<Message> {
         let Some((_, what)) = SHOTS.get(i) else {
@@ -359,16 +658,22 @@ impl App {
                 } else {
                     self.tx_tabs.activate_position(tab);
                 }
+                self.sync_live();
                 to_top(&self.scroll)
             }
             Shot::Help(link) => {
+                self.live = None;
                 let (t1, _) = self.help.update(HelpMsg::Open(Doc::Manual));
                 let (t2, _) = self.help.update(HelpMsg::Link(link.into()));
                 Task::batch([t1, t2, to_top(&self.scroll)])
             }
         };
         // the first shot waits longer: the window has to appear and the units to be listed
-        let wait = if i == 0 { 2500 } else { 1200 };
+        let wait = if i == 0 || SHOTS[i].0 == "rx-live" {
+            2500
+        } else {
+            1200
+        };
         let capture = cosmic::task::future(async move {
             let _ = tokio::task::spawn_blocking(move || {
                 std::thread::sleep(Duration::from_millis(wait))
@@ -411,6 +716,8 @@ impl App {
                 (Role::Tx, Power::On(_)) => " · on",
                 (Role::Tx, Power::NotLinked) => " · off",
                 (Role::Tx, Power::NoLinks) => " · not linked",
+                (Role::Rx, _) if u.powered == Some(true) => " · on",
+                (Role::Rx, _) if u.powered == Some(false) => " · off",
                 (Role::Tx, Power::Storage) => " · USB drive",
                 _ => "",
             };
@@ -445,10 +752,17 @@ impl App {
                     "not linked · the receiver has no transmitter linked: this one or the receiver is off".into(),
                 ),
                 Power::Storage => info.push("USB storage · wireless off".into()),
+                Power::RxOff => info.push("the receiver is switched off, so it can't tell whether this one is on".into()),
                 Power::Unknown => {}
             }
         } else if u.storage {
             info.push("USB storage · wireless off".into());
+        } else if u.role == Role::Rx {
+            match u.powered {
+                Some(true) => info.push("on".into()),
+                Some(false) => info.push("switched off (charging)".into()),
+                None => {}
+            }
         }
         widget::column::with_capacity(2)
             .push(widget::text::title3(unit_title(u)))
@@ -642,6 +956,7 @@ impl cosmic::Application for App {
         core.nav_bar_toggle_condensed();
         let rx_tabs = segmented_button::ModelBuilder::default()
             .insert(|b| b.text("Audio").data(Tab::Audio).activate())
+            .insert(|b| b.text("Live").data(Tab::Live))
             .insert(|b| b.text("Device").data(Tab::Device))
             .build();
         let tx_tabs = segmented_button::ModelBuilder::default()
@@ -668,6 +983,10 @@ impl cosmic::Application for App {
             tx_read_at: None,
             quitting: false,
             help: Help::default(),
+            live: None,
+            live_status: None,
+            live_text: Default::default(),
+            live_text_at: std::time::Instant::now(),
             demo: demo::active(),
             about: widget::about::About::default()
                 .name("MicDock")
@@ -721,6 +1040,7 @@ impl cosmic::Application for App {
     fn on_nav_select(&mut self, id: nav_bar::Id) -> Task<Message> {
         self.nav.activate(id);
         self.help.open = false;
+        self.sync_live();
         self.full_read = true;
         to_top(&self.scroll)
     }
@@ -764,6 +1084,10 @@ impl cosmic::Application for App {
                 _ => None,
             }),
         ]);
+        if self.live.is_some() {
+            let tick = iced::time::every(Duration::from_millis(50)).map(|_| Message::LiveTick);
+            return iced::Subscription::batch([poll, tick]);
+        }
         if self.rec.playing() {
             // redraw the player's position
             let tick =
@@ -788,6 +1112,57 @@ impl cosmic::Application for App {
             }
             Message::Watch if self.demo => {}
             Message::Shot(i) => return self.shot(i),
+            Message::LiveTick => {
+                if let Some((_, l)) = &self.live {
+                    let m = l.meters();
+                    if self.live_text_at.elapsed() >= Duration::from_millis(250) {
+                        self.live_text_at = std::time::Instant::now();
+                        self.live_text = std::array::from_fn(|c| {
+                            if m.peak[c] <= live::FLOOR {
+                                "—".to_string()
+                            } else if m.clipped[c] {
+                                format!("{:.0} dB clip", m.peak[c])
+                            } else {
+                                format!("{:.0} dB", m.peak[c])
+                            }
+                        });
+                    }
+                    if m.ended {
+                        self.live_status = m.error.or(Some("The receiver's audio stopped.".into()));
+                        self.live = None;
+                    }
+                }
+            }
+            Message::LiveRecord => {
+                if let Some((serial, l)) = &self.live {
+                    let name = self
+                        .units
+                        .get(serial)
+                        .map(unit_title)
+                        .unwrap_or_else(|| "receiver".into());
+                    let dir = PathBuf::from(expand_home(&self.cfg.str("export_dir")));
+                    let file = dir.join(format!(
+                        "{} {} live.wav",
+                        chrono::Local::now().format("%Y-%m-%d %H.%M.%S"),
+                        name.replace('/', "-")
+                    ));
+                    self.live_status = match l.start_recording(&file) {
+                        Ok(()) => None,
+                        Err(e) => Some(format!("Could not start recording: {e}")),
+                    };
+                }
+            }
+            Message::LiveView(i) => self.cfg.set("live_view", i as i64),
+            Message::LivePeaks(v) => self.cfg.set("live_hide_peaks", !v),
+            Message::LiveStop => {
+                if let Some((_, l)) = &self.live {
+                    self.live_status = l.stop_recording().map(|r| match r {
+                        Ok(p) => format!("Saved {}", p.display()),
+                        Err(e) => format!("Could not finish the recording: {e}"),
+                    });
+                }
+                self.sync_live();
+            }
             Message::ShotCapture(i) => {
                 let Some(id) = self.core.main_window_id() else {
                     return Task::none();
@@ -898,6 +1273,7 @@ impl cosmic::Application for App {
                     }
                 }
                 self.set_units(list);
+                self.sync_live();
                 if self.demo {
                     return Task::none();
                 }
@@ -916,6 +1292,7 @@ impl cosmic::Application for App {
             }
             Message::RxTab(id) => {
                 self.rx_tabs.activate(id);
+                self.sync_live();
                 self.full_read = true;
                 return to_top(&self.scroll);
             }
@@ -1033,6 +1410,7 @@ impl cosmic::Application for App {
                     self.rec.dialog = Some(recordings::Dialog::Quit);
                     return Task::none();
                 }
+                self.live = None; // closes a live recording properly
                 return iced::exit();
             }
             Message::ForceQuit => {
@@ -1046,7 +1424,10 @@ impl cosmic::Application for App {
                         self.rec.dialog = None;
                         self.quitting = true;
                     }
-                    None => return iced::exit(),
+                    None => {
+                        self.live = None;
+                        return iced::exit();
+                    }
                 }
             }
             Message::Done(r) => {
@@ -1153,6 +1534,7 @@ impl cosmic::Application for App {
         let page = match tab {
             Tab::Audio => self.audio_page(u),
             Tab::Recordings => self.rec.view(u, &self.cfg),
+            Tab::Live => self.live_page(u),
             Tab::Device => self.dev.view(u, &self.cfg, self.rec.live_offset),
         };
         let mut col = widget::column::with_capacity(5)
@@ -1171,5 +1553,73 @@ impl cosmic::Application for App {
         )
         .id(self.scroll.clone())
         .into()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn units(list: Vec<DeviceStatus>) -> BTreeMap<String, DeviceStatus> {
+        list.into_iter().map(|u| (u.serial.clone(), u)).collect()
+    }
+
+    #[test]
+    fn transmitter_power_states() {
+        let all = demo::units();
+        let (rx, tx1, tx2) = (all[0].clone(), all[1].clone(), all[2].clone());
+        // both linked to a switched-on receiver
+        let u = units(all.clone());
+        assert!(matches!(tx_power(&u, &tx1), Power::On(l) if l.slot == 1));
+        assert!(matches!(tx_power(&u, &tx2), Power::On(l) if l.slot == 2));
+        // TX2 not linked while TX1 is: TX2 is off (the receiver is evidently on)
+        let mut rx_one = rx.clone();
+        rx_one.links.retain(|l| l.slot == 1);
+        let u = units(vec![rx_one, tx1.clone(), tx2.clone()]);
+        assert!(matches!(tx_power(&u, &tx2), Power::NotLinked));
+        // nothing linked: can't tell which one is off
+        let mut rx_none = rx.clone();
+        rx_none.links.clear();
+        let u = units(vec![rx_none.clone(), tx1.clone()]);
+        assert!(matches!(tx_power(&u, &tx1), Power::NoLinks));
+        // the receiver is switched off (no sound card)
+        let mut rx_off = rx_none;
+        rx_off.powered = Some(false);
+        let u = units(vec![rx_off, tx1.clone()]);
+        assert!(matches!(tx_power(&u, &tx1), Power::RxOff));
+        // no receiver, or the TX is a USB drive
+        assert!(matches!(
+            tx_power(&units(vec![tx1.clone()]), &tx1),
+            Power::Unknown
+        ));
+        let mut drive = tx1.clone();
+        drive.storage = true;
+        assert!(matches!(tx_power(&units(all), &drive), Power::Storage));
+    }
+
+    #[test]
+    fn home_folder() {
+        let home = std::env::var("HOME").unwrap_or_default();
+        assert_eq!(
+            expand_home("~/go2-recordings"),
+            format!("{home}/go2-recordings")
+        );
+        assert_eq!(expand_home("/data/rec"), "/data/rec");
+    }
+
+    #[test]
+    fn demo_data_is_consistent() {
+        let all = demo::units();
+        let rx = all.iter().find(|u| u.role == Role::Rx).unwrap();
+        for tx in all.iter().filter(|u| u.role == Role::Tx) {
+            assert!(
+                rx.links.iter().any(|l| l.serial == tx.serial),
+                "{} linked",
+                tx.serial
+            );
+        }
+        let s = demo::sessions();
+        assert_eq!(s.iter().map(Vec::len).collect::<Vec<_>>(), [3, 1, 1]);
+        assert_eq!(SHOTS.len(), 6);
     }
 }

@@ -9,7 +9,9 @@ MicDock does on Linux what RØDE's own apps do for the Wireless GO II:
 - set the on-board record mode (Always / Manual / Backup / Off), the Ø button (Mute / Marker / Record / None)
   and the transmitters' low-sensitivity pad;
 - set the receiver's output (merged / split), gain mode and level (coarse, fine, camera preset) and power saver;
-- show which transmitters are switched on (through the receiver), with their battery level;
+- show which transmitters are switched on (through the receiver), with their battery level, and whether the
+  receiver is on;
+- show the receiver's USB audio live (level meters, spectrum) and record it to WAV — shared with other programs;
 - rename the units, set their clocks, and check for, download and install firmware updates.
 
 It talks to the units over `/dev/hidraw*` and needs no RØDE software. The app is built with libcosmic and follows
@@ -123,7 +125,20 @@ of `rodego2 list` and `rodego2 --dev /dev/hidrawN scan` (read-only).
 command (`'Q' 01`) erased the recordings of two transmitters during development; see [PROTOCOL.md](PROTOCOL.md).
 New settings are found by changing them on the unit itself and comparing read-only scans before and after.
 
-Before sending code: `cargo fmt`, `cargo clippy --all-targets` (no warnings) and `cargo test` in `src/`.
+Before sending code, run the same checks as CI locally: `scripts/check.sh` (formatting, clippy without warnings,
+all tests; `--quick` skips the tests). `scripts/install-hooks.sh` makes `git push` run it automatically.
+
+CI runs on pull requests (required before merging into `main`), on `main` and on release tags, for x86-64 and
+ARM64 — not on every branch push. A newer push to a pull request cancels the older run, and a pull request that
+only changes documentation skips the build. To build a branch without a pull request: Actions → build →
+*Run workflow*. The tests need no hardware: they use synthetic
+recordings (`micdock_core::testdata`, laid out like the transmitter writes them), run the command-line tools as a
+user would, and simulate the firmware installer. A few tests use real hardware and only run on request:
+
+```bash
+cargo test -- --ignored                                   # player: plays a test tone
+MICDOCK_TEST_RX=<receiver serial> cargo test -- --ignored # records 2 s from a switched-on receiver
+```
 
 ## License
 

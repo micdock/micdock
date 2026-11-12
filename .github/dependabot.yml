@@ -1,0 +1,13 @@
+# Dependabot: keep the GitHub Actions used by CI current (one grouped pull request a month), so deprecations
+# such as "Node.js 20 is deprecated" are fixed before they break the build. Every pull request runs CI first.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    groups:
+      actions:
+        patterns: ["*"]
+    commit-message:
+      prefix: "CI"

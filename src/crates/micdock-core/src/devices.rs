@@ -45,6 +45,26 @@ pub fn usb_dir(node: &str) -> PathBuf {
 }
 
 /// True if the USB device also offers a mass-storage interface (the TX is in USB storage mode).
+/// Whether the unit currently offers a USB audio interface (class 01). The receiver does that only while it
+/// is switched on (found 2026-11-12: switched off and charging it has only its HID interface), so this is the
+/// receiver's on/off state — read from sysfs, without touching the device.
+pub fn has_audio_interface(udir: &Path) -> bool {
+    let base = udir
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let Ok(rd) = std::fs::read_dir(udir) else {
+        return false;
+    };
+    rd.filter_map(|e| e.ok())
+        .filter(|e| {
+            e.file_name()
+                .to_string_lossy()
+                .starts_with(&format!("{base}:"))
+        })
+        .any(|e| sys(e.path().join("bInterfaceClass")) == "01")
+}
+
 pub fn in_storage_mode(udir: &Path) -> bool {
     let base = udir
         .file_name()
@@ -161,6 +181,8 @@ pub struct DeviceStatus {
     pub channel: Option<ChannelMode>,
     /// Transmitter: low-sensitivity pad on (lav gain 0).
     pub pad: Option<bool>,
+    /// Receiver: switched on (it offers its USB sound card only then). `None` for transmitters.
+    pub powered: Option<bool>,
     /// Receiver: power saver on (backlight off after 10 s).
     pub power_saver: Option<bool>,
     /// Receiver: output gain.
@@ -232,6 +254,7 @@ fn probe_devices_ex(full: bool, read_tx: bool) -> Vec<DeviceStatus> {
             power_saver: None,
             gain: None,
             pad: None,
+            powered: (Role::of(info.pid) == Role::Rx).then(|| has_audio_interface(&udir)),
         };
         if !read_tx && st.role == Role::Tx {
             out.push(st);

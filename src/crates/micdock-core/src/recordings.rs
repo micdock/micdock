@@ -794,3 +794,235 @@ mod tests {
         assert!(!is_recording("._REC00042.WAV"));
     }
 }
+
+#[cfg(test)]
+mod file_tests {
+    use super::*;
+    use crate::testdata::{samples, write_ugg, write_wav};
+
+    fn tmp(name: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("micdock-rec-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    /// The PCM data of a 44-byte-header WAV as samples.
+    fn wav_samples(path: &Path) -> Vec<i32> {
+        let b = std::fs::read(path).unwrap();
+        assert_eq!(&b[..4], b"RIFF");
+        let len = u32::from_le_bytes(b[40..44].try_into().unwrap()) as usize;
+        assert_eq!(len, b.len() - 44, "data size in the header");
+        b[44..]
+            .as_chunks::<3>()
+            .0
+            .iter()
+            .map(|s| i32::from_le_bytes([0, s[0], s[1], s[2]]) >> 8)
+            .collect()
+    }
+
+    #[test]
+    fn reads_a_wav_recording() {
+        let d = tmp("wav");
+        let p = d.join("REC00051.WAV");
+        write_wav(&p, &samples(4800, 1), &[480, 2400], 1_800_000_000.0);
+        let r = open_recording(&p).unwrap();
+        assert_eq!(r.kind(), "WAV");
+        assert_eq!((r.rate, r.bits, r.channels, r.width), (48000, 24, 1, 3));
+        assert_eq!(r.frames, 4800);
+        assert!((r.seconds() - 0.1).abs() < 1e-9);
+        assert_eq!(r.markers, vec![480, 2400]);
+        assert_eq!(r.mtime, 1_800_000_000.0);
+        assert!(matches!(
+            r.container,
+            Container::Wav {
+                data_offset: 32768,
+                ..
+            }
+        ));
+        std::fs::remove_dir_all(d).unwrap();
+    }
+
+    #[test]
+    fn reads_a_ugg_recording_with_its_granule() {
+        let d = tmp("ugg");
+        let p = d.join("REC00042.UGG");
+        write_ugg(&p, 1000, &samples(1000, 2), 1_000_000_000.0);
+        let r = open_recording(&p).unwrap();
+        assert_eq!(r.kind(), "UGG");
+        assert_eq!((r.rate, r.bits, r.channels, r.width), (48000, 24, 1, 3));
+        assert_eq!(r.frames, 1000);
+        match r.container {
+            Container::Ugg { first_gp, last_gp } => assert_eq!((first_gp, last_gp), (1000, 2000)),
+            _ => panic!("not UGG"),
+        }
+        std::fs::remove_dir_all(d).unwrap();
+    }
+
+    #[test]
+    fn rejects_other_files() {
+        let d = tmp("junk");
+        let p = d.join("PEA00001.EGG");
+        std::fs::write(&p, b"RODEWgo2P peaks").unwrap();
+        assert!(open_recording(&p).is_err());
+        std::fs::remove_dir_all(d).unwrap();
+    }
+
+    #[test]
+    fn ugg_pieces_join_by_granule() {
+        let d = tmp("join-ugg");
+        let (a, b, c) = (
+            d.join("REC00001.UGG"),
+            d.join("REC00002.UGG"),
+            d.join("REC00003.UGG"),
+        );
+        write_ugg(&a, 0, &samples(600, 1), 100.0);
+        write_ugg(&b, 600, &samples(400, 2), 200.0); // continues a
+        write_ugg(&c, 0, &samples(200, 3), 300.0); // a new recording
+        let infos = [&c, &a, &b].map(|p| open_recording(p).unwrap()).to_vec();
+        let sessions = group_sessions(infos);
+        let names: Vec<Vec<&str>> = sessions
+            .iter()
+            .map(|s| s.iter().map(|r| r.name.as_str()).collect())
+            .collect();
+        assert_eq!(
+            names,
+            [vec!["REC00001.UGG", "REC00002.UGG"], vec!["REC00003.UGG"]]
+        );
+        std::fs::remove_dir_all(d).unwrap();
+    }
+
+    /// WAV pieces have no granule: a full-length piece (>= 30 min) followed within 10 s by the next.
+    #[test]
+    fn wav_pieces_join_by_length_and_time() {
+        let piece = |name: &str, secs: f64, end: f64| Recording {
+            path: PathBuf::from(name),
+            name: name.into(),
+            size: 0,
+            mtime: end,
+            rate: 48000,
+            bits: 24,
+            channels: 1,
+            width: 3,
+            byteswap: false,
+            frame_bytes: 3,
+            frames: (secs * 48000.0) as u64,
+            markers: vec![],
+            container: Container::Wav {
+                data_offset: 32768,
+                data_len: 0,
+            },
+        };
+        let a = piece("REC00010.WAV", 1860.0, 10_000.0);
+        let b = piece("REC00011.WAV", 500.0, 10_000.0 + 2.0 + 500.0); // starts 2 s after a ended
+        let c = piece("REC00012.WAV", 60.0, 20_000.0); // much later
+        let d = piece("REC00013.WAV", 30.0, 20_000.0 + 30.0); // right after c, but c was short
+        assert!(continues(&a, &b));
+        assert!(!continues(&b, &c));
+        assert!(!continues(&c, &d), "only a full-length piece is continued");
+        let late = piece("REC00011.WAV", 500.0, 10_000.0 + 30.0 + 500.0);
+        assert!(!continues(&a, &late), "a gap of 30 s is a new recording");
+        let s = group_sessions(vec![d, c, b, a]);
+        assert_eq!(s.iter().map(Vec::len).collect::<Vec<_>>(), [2, 1, 1]);
+    }
+
+    #[test]
+    fn exports_joined_wav_pieces_sample_exact() {
+        let d = tmp("export-wav");
+        let (a, b) = (d.join("REC00001.WAV"), d.join("REC00002.WAV"));
+        let (sa, sb) = (samples(3000, 1), samples(1500, 2));
+        write_wav(&a, &sa, &[], 100.0);
+        write_wav(&b, &sb, &[], 200.0);
+        let infos = [&a, &b].map(|p| open_recording(p).unwrap());
+        let out = d.join("joined.wav");
+        let mut reports = 0;
+        let mut report = |_: u64, _: u64| reports += 1;
+        let progress = Progress {
+            report: Some(&mut report),
+            cancel: None,
+        };
+        let frames = export(
+            &infos,
+            &out,
+            &Encoding::Wav,
+            Some(50.0),
+            Some(1_700_000_000.5),
+            progress,
+        )
+        .unwrap();
+        assert_eq!(frames, 4500);
+        assert!(reports >= 1, "the final progress report");
+        let mut want = sa.clone();
+        want.extend(&sb);
+        assert_eq!(wav_samples(&out), want);
+        let mtime = std::fs::metadata(&out).unwrap().modified().unwrap();
+        let secs = mtime
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs_f64();
+        assert!(
+            (secs - 1_700_000_000.5).abs() < 0.01,
+            "file date = end of the recording"
+        );
+        assert!(!d.join("joined.wav.part").exists());
+        std::fs::remove_dir_all(d).unwrap();
+    }
+
+    #[test]
+    fn exports_ugg_as_wav_sample_exact() {
+        let d = tmp("export-ugg");
+        let p = d.join("REC00007.UGG");
+        let s = samples(2500, 7);
+        write_ugg(&p, 0, &s, 100.0);
+        let r = open_recording(&p).unwrap();
+        let out = d.join("out.wav");
+        export(&[r], &out, &Encoding::Wav, None, None, Progress::default()).unwrap();
+        assert_eq!(wav_samples(&out), s);
+        std::fs::remove_dir_all(d).unwrap();
+    }
+
+    #[test]
+    fn refuses_mixed_formats() {
+        let d = tmp("mixed");
+        let (a, b) = (d.join("REC00001.WAV"), d.join("REC00002.UGG"));
+        write_wav(&a, &samples(100, 1), &[], 1.0);
+        write_ugg(&b, 0, &samples(100, 2), 2.0);
+        let mut infos = [&a, &b].map(|p| open_recording(p).unwrap());
+        infos[1].channels = 2; // a different format
+        let err = export(
+            &infos,
+            &d.join("x.wav"),
+            &Encoding::Wav,
+            None,
+            None,
+            Progress::default(),
+        );
+        assert!(err.is_err());
+        assert!(!d.join("x.wav").exists() && !d.join("x.wav.part").exists());
+        std::fs::remove_dir_all(d).unwrap();
+    }
+
+    #[test]
+    fn cancelled_export_leaves_no_file() {
+        let d = tmp("cancel");
+        let p = d.join("REC00001.WAV");
+        write_wav(&p, &samples(800_000, 1), &[], 1.0); // 2.4 MB: progress is checked every MiB
+        let r = open_recording(&p).unwrap();
+        let cancel = std::sync::atomic::AtomicBool::new(true);
+        let progress = Progress {
+            report: None,
+            cancel: Some(&cancel),
+        };
+        let out = d.join("out.wav");
+        let err = export(&[r], &out, &Encoding::Wav, None, None, progress).unwrap_err();
+        assert_eq!(err.to_string(), CANCELLED);
+        assert!(!out.exists() && !d.join("out.wav.part").exists());
+        std::fs::remove_dir_all(d).unwrap();
+    }
+
+    #[test]
+    fn mp3_options() {
+        assert_eq!(mp3_args(2, None), ["-q:a", "2"]);
+        assert_eq!(mp3_args(0, Some("320k")), ["-b:a", "320k"]);
+    }
+}

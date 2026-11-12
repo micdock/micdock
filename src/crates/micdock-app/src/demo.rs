@@ -53,6 +53,7 @@ fn unit(serial: &str, pid: u16, role: Role, node: &str, name: &str, battery: u8)
         channel: None,
         pad: None,
         power_saver: None,
+        powered: None,
         gain: None,
         id: None,
         links: Vec::new(),
@@ -64,6 +65,7 @@ pub fn units() -> Vec<DeviceStatus> {
     let mut rx = unit(RX, 0x002A, Role::Rx, "/dev/hidraw8", "Camera A", 100);
     rx.channel = Some(ChannelMode::Split);
     rx.power_saver = Some(true);
+    rx.powered = Some(true);
     rx.gain = Some(Gain {
         mode: FINE_GAIN,
         step: 7,

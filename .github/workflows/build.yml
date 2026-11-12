@@ -1,17 +1,26 @@
-# Build and check MicDock on every push and pull request; on a version tag (v1.2.3) also publish a
-# GitHub release with the Linux archives.
+# Build and check MicDock; on a version tag (v1.2.3) also publish a GitHub release with the Linux archives.
 #
 # The builds run inside AlmaLinux 9 (glibc 2.34), so the binaries also start on older distributions:
 # everything with glibc 2.34 or newer (Ubuntu 22.04+, Debian 12+, RHEL/Alma/Rocky 9+, Fedora 35+,
 # openSUSE Leap 15.6, Arch, …). A binary built against a newer glibc would refuse to start there.
 name: build
 
+# When it runs (kept lean: public repositories have free minutes, but nobody likes waiting):
+# - pull requests: the checks `main` requires before a merge (a newer push cancels the older run;
+#   a pull request that only changes documentation skips the build and still reports success);
+# - pushes to `main` (after a merge; also keeps the build cache warm for pull requests) and `v*` tags
+#   (releases). Other branch pushes don't run: check locally with `scripts/check.sh` first;
+# - by hand: Actions → build → Run workflow (any branch).
 on:
   push:
     branches: [main]
     tags: ["v*"]
   pull_request:
   workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
@@ -31,10 +40,34 @@ jobs:
     env:
       CARGO_TERM_COLOR: always
     steps:
-      - name: System packages
-        # retried: a mirror once returned an empty repomd.xml ("Failed to download metadata")
+      # retried: a mirror once returned an empty repomd.xml ("Failed to download metadata")
+      - name: git
         run: |
-          pkgs="gcc make pkgconf-pkg-config alsa-lib-devel libxkbcommon-devel git"
+          for i in 1 2 3 4 5; do dnf -y -q install git && break; dnf clean all; sleep 15; done
+          git config --global --add safe.directory '*'
+
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: What changed
+        id: changes
+        run: |
+          code=true
+          if [ "$GITHUB_EVENT_NAME" = pull_request ]; then
+            files=$(git diff --name-only "origin/$GITHUB_BASE_REF...HEAD")
+            echo "$files"
+            if [ -n "$files" ] && ! echo "$files" | grep -qvE '^(docs/|LICENSE$|\.github/FUNDING\.yml$|.*\.md$)'; then
+              code=false
+              echo "Only documentation changed: the build is skipped (the check still passes)."
+            fi
+          fi
+          echo "code=$code" >> "$GITHUB_OUTPUT"
+
+      - name: System packages
+        if: steps.changes.outputs.code == 'true'
+        run: |
+          pkgs="gcc make pkgconf-pkg-config alsa-lib-devel libxkbcommon-devel"
           for i in 1 2 3 4 5; do
             dnf -y install --enablerepo=crb $pkgs && break
             echo "dnf failed (attempt $i), retrying with a clean cache"
@@ -42,48 +75,55 @@ jobs:
             sleep 15
           done
           rpm -q $pkgs
-          git config --global --add safe.directory '*'
-
-      - uses: actions/checkout@v4
 
       - name: Rust
+        if: steps.changes.outputs.code == 'true'
         uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
 
       - uses: Swatinem/rust-cache@v2
+        if: steps.changes.outputs.code == 'true'
         with:
           workspaces: src
           key: ${{ matrix.arch }}
+          # only main saves the cache; pull requests reuse it (they can't share their own anyway)
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Formatting
-        if: matrix.arch == 'x86_64'
+        if: steps.changes.outputs.code == 'true' && matrix.arch == 'x86_64'
         working-directory: src
         run: cargo fmt --all --check
 
       - name: Clippy
-        if: matrix.arch == 'x86_64'
+        if: steps.changes.outputs.code == 'true' && matrix.arch == 'x86_64'
         working-directory: src
         run: cargo clippy --release --locked --all-targets -- -D warnings
 
       - name: Tests
+        if: steps.changes.outputs.code == 'true'
         working-directory: src
         run: cargo test --release --locked
 
       - name: Build
+        if: steps.changes.outputs.code == 'true'
         working-directory: src
         run: cargo build --release --locked
 
       - name: Archive
+        if: steps.changes.outputs.code == 'true'
         run: |
           version="${GITHUB_REF_NAME#v}"
           case "$GITHUB_REF" in refs/tags/v*) ;; *) version="$(git rev-parse --short HEAD)" ;; esac
           packaging/make-release.sh "$version"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
+        if: steps.changes.outputs.code == 'true'
         with:
           name: micdock-linux-${{ matrix.arch }}
           path: dist/micdock-*
+          # releases attach the archives to the release itself; other builds are only for trying out
+          retention-days: ${{ startsWith(github.ref, 'refs/tags/v') && 30 || 7 }}
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')
@@ -92,9 +132,9 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           pattern: micdock-linux-*
           merge-multiple: true
@@ -117,7 +157,7 @@ jobs:
           EOF
 
       - name: Publish
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           name: MicDock ${{ github.ref_name }}
           body_path: notes.md
