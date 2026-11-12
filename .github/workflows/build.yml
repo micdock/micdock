@@ -32,8 +32,16 @@ jobs:
       CARGO_TERM_COLOR: always
     steps:
       - name: System packages
+        # retried: a mirror once returned an empty repomd.xml ("Failed to download metadata")
         run: |
-          dnf -y install --enablerepo=crb gcc make pkgconf-pkg-config alsa-lib-devel libxkbcommon-devel git
+          pkgs="gcc make pkgconf-pkg-config alsa-lib-devel libxkbcommon-devel git"
+          for i in 1 2 3 4 5; do
+            dnf -y install --enablerepo=crb $pkgs && break
+            echo "dnf failed (attempt $i), retrying with a clean cache"
+            dnf clean all
+            sleep 15
+          done
+          rpm -q $pkgs
           git config --global --add safe.directory '*'
 
       - uses: actions/checkout@v4
