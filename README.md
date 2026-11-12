@@ -108,6 +108,11 @@ MICDOCK_DEMO=1 src/target/release/micdock                     # just look around
 
 Run it again after changing the interface. The pictures follow your desktop theme (light/dark, accent colour).
 
+## Support MicDock
+
+MicDock is free and made in spare time. If it saves you a trip to a Windows or Mac computer, you can
+[buy me a coffee](https://buymeacoffee.com/ilom) ☕. Thank you!
+
 ## Contributing and reporting problems
 
 Bug reports and pull requests are welcome at <https://github.com/micdock/micdock/issues>. Please mention the

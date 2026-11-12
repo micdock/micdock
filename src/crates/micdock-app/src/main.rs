@@ -683,6 +683,7 @@ impl cosmic::Application for App {
                 .license_url("https://www.gnu.org/licenses/gpl-3.0.html")
                 .links([
                     ("Project page and issues", "https://github.com/micdock/micdock"),
+                    ("☕ Buy me a coffee", "https://buymeacoffee.com/ilom"),
                     ("RØDE's Wireless GO II user guide", micdock_core::guide::GUIDE_URL),
                 ]),
             scroll: widget::Id::unique(),

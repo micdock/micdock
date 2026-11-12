@@ -293,5 +293,7 @@ Settings are stored in `~/.config/micdock/`, downloads and previews in `~/.cache
 
 MicDock's home is <https://github.com/micdock/micdock>: report problems and suggestions there.
 
+If MicDock is useful to you, you can support it by [buying me a coffee](https://buymeacoffee.com/ilom) ☕.
+
 MicDock is free software under the GNU General Public License, version 3 or later. It comes with no warranty.
 RØDE and Wireless GO are trademarks of their owner and are used only to name the hardware MicDock works with.
