@@ -103,6 +103,9 @@ pub enum Message {
     LiveTick,
     LiveRecord,
     LiveStop,
+    /// Spectrum: 0 = both, 1 = left, 2 = right.
+    LiveView(usize),
+    LivePeaks(bool),
     /// The window's close button, Alt+F4, the compositor…
     Quit,
     /// Quit even though an export is running (it is cancelled).
@@ -141,6 +144,9 @@ struct App {
     /// The receiver's live audio (serial, capture), while its Live tab is open or it records.
     live: Option<(String, live::Live)>,
     live_status: Option<String>,
+    /// The dB values shown next to the level meters, updated 4× a second (calmer to read than 20×).
+    live_text: [String; live::CHANNELS],
+    live_text_at: std::time::Instant,
     /// Demo mode: made-up units, no device access, no network.
     demo: bool,
     about: widget::about::About,
@@ -328,11 +334,12 @@ fn tx_power<'a>(units: &'a BTreeMap<String, DeviceStatus>, tx: &DeviceStatus) ->
 }
 
 /// The screenshots for the manual: (file name, what to show).
-const SHOTS: [(&str, Shot); 5] = [
+const SHOTS: [(&str, Shot); 6] = [
     ("tx-audio", Shot::Unit(demo::TX1, 0)),
     ("recordings", Shot::Unit(demo::TX1, 1)),
     ("device", Shot::Unit(demo::TX1, 2)),
     ("rx-audio", Shot::Unit(demo::RX, 0)),
+    ("rx-live", Shot::Unit(demo::RX, 1)),
     ("help", Shot::Help("#on-board-recording")),
 ];
 
@@ -371,6 +378,14 @@ impl App {
     /// (unless it is recording).
     fn sync_live(&mut self) {
         if self.demo {
+            let on_live = self.selected().is_some_and(|u| u.role == Role::Rx)
+                && !self.help.open
+                && self.tab(Role::Rx) == Tab::Live;
+            match (on_live, self.live.is_some()) {
+                (true, false) => self.live = Some((demo::RX.to_string(), live::Live::demo())),
+                (false, true) => self.live = None,
+                _ => {}
+            }
             return;
         }
         let want = self.selected().filter(|u| {
@@ -434,48 +449,153 @@ impl App {
         };
         // level meters
         let mut meters = settings::section().title("Level");
+        // a bar in the accent colour on a dark track, with a marker at the held peak
+        let fill = |alpha: f32| {
+            cosmic::theme::Container::custom(move |t: &cosmic::Theme| {
+                let mut c: cosmic::iced::Color = t.cosmic().accent_color().into();
+                c.a = alpha;
+                cosmic::iced::widget::container::Style {
+                    background: Some(c.into()),
+                    border: cosmic::iced::border::rounded(2),
+                    ..Default::default()
+                }
+            })
+        };
+        const W: f32 = 220.0;
         for (c, name) in names.iter().enumerate() {
-            let frac = ((m.level[c] - live::FLOOR) / -live::FLOOR).clamp(0.0, 1.0);
-            let text = if m.peak[c] <= live::FLOOR {
-                "—".to_string()
+            let pos = |db: f32| ((db - live::FLOOR) / -live::FLOOR).clamp(0.0, 1.0) * W;
+            let level = pos(m.level[c]);
+            let peak = pos(m.peak[c]).max(level);
+            let text = self.live_text[c].clone();
+            let mut bar = widget::row::with_capacity(4)
+                .height(Length::Fixed(8.0))
+                .push(
+                    widget::container(widget::Space::new())
+                        .width(Length::Fixed(level.max(1.0)))
+                        .height(Length::Fill)
+                        .class(fill(1.0)),
+                );
+            if peak > level + 3.0 {
+                bar = bar
+                    .push(
+                        widget::container(widget::Space::new())
+                            .width(Length::Fixed(peak - level - 2.0))
+                            .height(Length::Fill)
+                            .class(fill(0.15)),
+                    )
+                    .push(
+                        widget::container(widget::Space::new())
+                            .width(Length::Fixed(2.0))
+                            .height(Length::Fill)
+                            .class(fill(1.0)),
+                    );
+            }
+            let used = if peak > level + 3.0 {
+                peak
             } else {
-                format!("{:.0} dB", m.peak[c])
+                level.max(1.0)
             };
+            bar = bar.push(
+                widget::container(widget::Space::new())
+                    .width(Length::Fixed((W - used).max(0.0)))
+                    .height(Length::Fill)
+                    .class(fill(0.15)),
+            );
             meters = meters.add(settings::item(
                 *name,
                 widget::row::with_capacity(2)
                     .spacing(space.space_s)
                     .align_y(Alignment::Center)
-                    .push(
-                        widget::progress_bar::determinate_linear(frac).width(Length::Fixed(260.0)),
-                    )
-                    .push(widget::text::monotext(format!("{text:>7}"))),
+                    .push(bar)
+                    .push(widget::text::body(text).width(Length::Fixed(90.0))),
             ));
         }
         col = col.push(meters);
-        // spectrum: one bar per band, −90 … −10 dB
-        let bars = m.bands.iter().fold(
-            widget::row::with_capacity(live::BANDS)
-                .spacing(3)
-                .align_y(Alignment::End)
-                .height(Length::Fixed(120.0)),
-            |row, &db| {
-                let h = (((db + 90.0) / 80.0).clamp(0.0, 1.0) * 116.0) + 4.0;
-                row.push(
+        // spectrum: per band one bar (both channels mixed, or one channel), or two (left and right, split mode)
+        let split = u.channel == Some(ChannelMode::Split);
+        let view = self.cfg.int("live_view").unwrap_or(0).clamp(0, 2) as usize;
+        let peaks = !self.cfg.bool("live_hide_peaks");
+        // (index into the spectra: 0 = mixed, 1 = left, 2 = right; opacity)
+        let series: Vec<(usize, f32)> = match view {
+            1 => vec![(1, 1.0)],
+            2 => vec![(2, 1.0)],
+            _ if split => vec![(1, 1.0), (2, 0.5)],
+            _ => vec![(0, 1.0)],
+        };
+        const H: f32 = 140.0;
+        let to_h = |db: f32| ((db + 90.0) / 80.0).clamp(0.0, 1.0) * (H - 4.0) + 2.0;
+        let accent = |alpha: f32| {
+            cosmic::theme::Container::custom(move |t: &cosmic::Theme| {
+                let mut c: cosmic::iced::Color = t.cosmic().accent_color().into();
+                c.a = alpha;
+                cosmic::iced::widget::container::Style {
+                    background: Some(c.into()),
+                    border: cosmic::iced::border::rounded(2),
+                    ..Default::default()
+                }
+            })
+        };
+        let mut bars = widget::row::with_capacity(live::BANDS)
+            .spacing(if series.len() > 1 { 6 } else { 3 })
+            .height(Length::Fixed(H));
+        for k in 0..live::BANDS {
+            let mut group = widget::row::with_capacity(series.len())
+                .spacing(1)
+                .width(Length::Fill);
+            for &(i, alpha) in &series {
+                let bar = to_h(m.bands[i].get(k).copied().unwrap_or(-90.0));
+                let top = to_h(m.tops[i].get(k).copied().unwrap_or(-90.0)).max(bar);
+                let mut col = widget::column::with_capacity(4)
+                    .width(Length::Fill)
+                    .height(Length::Fixed(H))
+                    .push(widget::Space::new().height(Length::Fill));
+                if peaks && top > bar + 3.0 {
+                    col = col
+                        .push(
+                            widget::container(widget::Space::new())
+                                .width(Length::Fill)
+                                .height(Length::Fixed(2.0))
+                                .class(accent(alpha.max(0.7))),
+                        )
+                        .push(widget::Space::new().height(Length::Fixed(top - bar - 2.0)));
+                }
+                col = col.push(
                     widget::container(widget::Space::new())
                         .width(Length::Fill)
-                        .height(Length::Fixed(h))
-                        .class(cosmic::theme::Container::Primary),
-                )
-            },
-        );
+                        .height(Length::Fixed(bar))
+                        .class(accent(alpha)),
+                );
+                group = group.push(col);
+            }
+            bars = bars.push(group);
+        }
+        let both = if split {
+            "Both (side by side)"
+        } else {
+            "Both (mixed)"
+        };
+        let choices = vec![both, "Left (TX1)", "Right (TX2)"];
+        let legend = match (view, split) {
+            (0, true) => "Per band: left (TX1) dark, right (TX2) light.",
+            _ => "",
+        };
         col = col.push(
             settings::section()
                 .title("Spectrum")
+                .add(settings::item(
+                    "Channel",
+                    widget::dropdown(choices, Some(view), Message::LiveView),
+                ))
+                .add(settings::item(
+                    "Show peaks",
+                    widget::toggler(peaks).on_toggle(Message::LivePeaks),
+                ))
                 .add(bars)
-                .add(widget::text::caption(
-                    "40 Hz … 20 kHz, both channels together",
-                )),
+                .add(widget::text::caption(format!(
+                    "40 Hz … 20 kHz. {legend} Peak markers hold the highest level for 2 seconds: \
+                     outliers that reach the top need less gain (on the transmitter: the pad; on the camera: \
+                     a lower input level)."
+                ))),
         );
         // recording
         let rec: Element<'_, Message> = match &m.recording {
@@ -538,16 +658,22 @@ impl App {
                 } else {
                     self.tx_tabs.activate_position(tab);
                 }
+                self.sync_live();
                 to_top(&self.scroll)
             }
             Shot::Help(link) => {
+                self.live = None;
                 let (t1, _) = self.help.update(HelpMsg::Open(Doc::Manual));
                 let (t2, _) = self.help.update(HelpMsg::Link(link.into()));
                 Task::batch([t1, t2, to_top(&self.scroll)])
             }
         };
         // the first shot waits longer: the window has to appear and the units to be listed
-        let wait = if i == 0 { 2500 } else { 1200 };
+        let wait = if i == 0 || SHOTS[i].0 == "rx-live" {
+            2500
+        } else {
+            1200
+        };
         let capture = cosmic::task::future(async move {
             let _ = tokio::task::spawn_blocking(move || {
                 std::thread::sleep(Duration::from_millis(wait))
@@ -859,6 +985,8 @@ impl cosmic::Application for App {
             help: Help::default(),
             live: None,
             live_status: None,
+            live_text: Default::default(),
+            live_text_at: std::time::Instant::now(),
             demo: demo::active(),
             about: widget::about::About::default()
                 .name("MicDock")
@@ -987,6 +1115,18 @@ impl cosmic::Application for App {
             Message::LiveTick => {
                 if let Some((_, l)) = &self.live {
                     let m = l.meters();
+                    if self.live_text_at.elapsed() >= Duration::from_millis(250) {
+                        self.live_text_at = std::time::Instant::now();
+                        self.live_text = std::array::from_fn(|c| {
+                            if m.peak[c] <= live::FLOOR {
+                                "—".to_string()
+                            } else if m.clipped[c] {
+                                format!("{:.0} dB clip", m.peak[c])
+                            } else {
+                                format!("{:.0} dB", m.peak[c])
+                            }
+                        });
+                    }
                     if m.ended {
                         self.live_status = m.error.or(Some("The receiver's audio stopped.".into()));
                         self.live = None;
@@ -1012,6 +1152,8 @@ impl cosmic::Application for App {
                     };
                 }
             }
+            Message::LiveView(i) => self.cfg.set("live_view", i as i64),
+            Message::LivePeaks(v) => self.cfg.set("live_hide_peaks", !v),
             Message::LiveStop => {
                 if let Some((_, l)) = &self.live {
                     self.live_status = l.stop_recording().map(|r| match r {

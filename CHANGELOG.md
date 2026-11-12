@@ -3,7 +3,9 @@
 ## 0.10.0
 
 - **Live audio from the receiver:** a new *Live* tab shows the receiver's USB audio with a level meter per
-  channel and a 24-band spectrum, and records it to a WAV file (48 kHz, 24-bit, stereo). MicDock listens through
+  channel (with peak marker and a *clip* warning) and a 24-band spectrum — two bars per band in split mode, or
+  one channel of your choice, with optional peak markers to spot outliers — and records it to a WAV file
+  (48 kHz, 24-bit, stereo). MicDock listens through
   PipeWire/PulseAudio, so other programs can use the receiver at the same time; the recording continues when you
   switch pages.
 - **The receiver's on/off state:** MicDock now sees whether the receiver is switched on (it is a USB sound card

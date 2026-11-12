@@ -152,11 +152,17 @@ linked. The sidebar shows the same state next to each transmitter.
 
 ### Live audio and recording (receiver)
 
+![The receiver's Live tab: level meters and the spectrum of both channels side by side, with peak markers](img/rx-live.png)
+
 The receiver is also a USB sound card — but only while it is switched on. Its **Live** tab shows what it outputs
 over USB:
 
 - **Level:** a meter per channel (in split mode: left = transmitter 1, right = transmitter 2) with the peak in dB.
-- **Spectrum:** 24 bands from 40 Hz to 20 kHz, to see at a glance whether there is sound, hum or wind noise.
+- **Spectrum:** 24 bands from 40 Hz to 20 kHz, to see at a glance whether there is sound, hum or wind noise. In
+  split mode each band has two bars, left (transmitter 1, dark) and right (transmitter 2, light); **Channel**
+  shows one channel on its own. **Show peaks** marks the highest level of each band for 2 seconds, so short
+  outliers stand out. A level meter that says **clip** reached full scale: lower the gain (the transmitter's
+  low-sensitivity pad, or your camera's input level).
 - **Record:** writes the receiver's USB audio (48 kHz, 24-bit, stereo) as a WAV file into the export folder,
   named after the date and time. The recording continues when you switch to another page; **Stop recording**
   ends it, and quitting MicDock closes the file properly too.

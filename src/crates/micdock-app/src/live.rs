@@ -22,6 +22,11 @@ const FFT: usize = 2048;
 /// Meters show −60 … 0 dBFS; the spectrum −90 … −10 dB.
 pub const FLOOR: f32 = -60.0;
 const DECAY_DB_PER_S: f32 = 24.0;
+/// Peak hold per band: seconds held, then dB/s falling.
+const HOLD: f32 = 2.0;
+const TOP_FALL_DB_PER_S: f32 = 12.0;
+/// How long "clip" stays shown after the signal came within 1 dB of full scale.
+const CLIP_SHOW: f32 = 3.0;
 
 /// The receiver's source in the sound server, e.g.
 /// `alsa_input.usb-R__DE_Wireless_GO_II_RX_22481E5B-01.analog-stereo` (its name contains the USB serial).
@@ -92,10 +97,15 @@ struct Shared {
     level: [f32; CHANNELS],
     /// Peak per channel, dBFS (held, then falling).
     peak: [f32; CHANNELS],
-    /// Spectrum of both channels together, dB per band.
-    bands: Vec<f32>,
+    /// Spectra (dB per band) of [both channels mixed, left, right].
+    bands: [Vec<f32>; 3],
+    /// Highest recent value per band (held for `HOLD`, then falling), same layout.
+    tops: [Vec<f32>; 3],
+    held: [Vec<Instant>; 3],
     recording: Option<Wav>,
     recorded_since: Option<Instant>,
+    /// When a channel last came within 1 dB of full scale.
+    clip_at: [Option<Instant>; CHANNELS],
     error: Option<String>,
     ended: bool,
 }
@@ -103,7 +113,8 @@ struct Shared {
 /// A running capture. Dropping it stops the capture (and closes a recording).
 pub struct Live {
     pub source: String,
-    child: Child,
+    /// `parec`; `None` for the demo signal.
+    child: Option<Child>,
     shared: Arc<Mutex<Shared>>,
 }
 
@@ -111,7 +122,12 @@ pub struct Live {
 pub struct Meters {
     pub level: [f32; CHANNELS],
     pub peak: [f32; CHANNELS],
-    pub bands: Vec<f32>,
+    /// Spectra (dB per band) of [both channels mixed, left, right].
+    pub bands: [Vec<f32>; 3],
+    /// Peak hold per band, same layout.
+    pub tops: [Vec<f32>; 3],
+    /// A channel came within 1 dB of full scale in the last seconds.
+    pub clipped: [bool; CHANNELS],
     /// (file, seconds, bytes) while recording.
     pub recording: Option<(PathBuf, f64, u64)>,
     pub error: Option<String>,
@@ -141,7 +157,10 @@ impl Live {
         let shared = Arc::new(Mutex::new(Shared {
             level: [FLOOR; CHANNELS],
             peak: [FLOOR; CHANNELS],
-            bands: vec![-90.0; BANDS],
+            bands: std::array::from_fn(|_| vec![-90.0; BANDS]),
+            tops: std::array::from_fn(|_| vec![-90.0; BANDS]),
+            held: std::array::from_fn(|_| vec![Instant::now(); BANDS]),
+            clip_at: [None; CHANNELS],
             ..Default::default()
         }));
         let sh = shared.clone();
@@ -151,9 +170,29 @@ impl Live {
             .map_err(|e| e.to_string())?;
         Ok(Live {
             source: source.to_string(),
-            child,
+            child: Some(child),
             shared,
         })
+    }
+
+    /// Demo mode: the same meters on a made-up signal (no sound server needed).
+    pub fn demo() -> Live {
+        let shared = Arc::new(Mutex::new(Shared {
+            level: [FLOOR; CHANNELS],
+            peak: [FLOOR; CHANNELS],
+            bands: std::array::from_fn(|_| vec![-90.0; BANDS]),
+            tops: std::array::from_fn(|_| vec![-90.0; BANDS]),
+            held: std::array::from_fn(|_| vec![Instant::now(); BANDS]),
+            clip_at: [None; CHANNELS],
+            ..Default::default()
+        }));
+        let sh = shared.clone();
+        std::thread::spawn(move || read_loop(Synth::default(), sh));
+        Live {
+            source: "demo signal".into(),
+            child: None,
+            shared,
+        }
     }
 
     pub fn meters(&self) -> Meters {
@@ -161,7 +200,9 @@ impl Live {
             return Meters {
                 level: [FLOOR; 2],
                 peak: [FLOOR; 2],
-                bands: vec![],
+                bands: Default::default(),
+                tops: Default::default(),
+                clipped: [false; CHANNELS],
                 recording: None,
                 error: None,
                 ended: true,
@@ -171,6 +212,10 @@ impl Live {
             level: s.level,
             peak: s.peak,
             bands: s.bands.clone(),
+            tops: s.tops.clone(),
+            clipped: s
+                .clip_at
+                .map(|t| t.is_some_and(|t| t.elapsed().as_secs_f32() < CLIP_SHOW)),
             recording: s.recording.as_ref().map(|w| {
                 let secs = w.bytes as f64 / (RATE as f64 * FRAME_BYTES as f64);
                 (w.path.clone(), secs, w.bytes)
@@ -212,8 +257,46 @@ impl Live {
 impl Drop for Live {
     fn drop(&mut self) {
         let _ = self.stop_recording();
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        if let Some(c) = self.child.as_mut() {
+            let _ = c.kill();
+            let _ = c.wait();
+        }
+    }
+}
+
+/// A voice-like demo signal in real time: a few harmonics that rise and fall, some noise, the left channel
+/// louder than the right, and a short loud peak now and then.
+#[derive(Default)]
+struct Synth {
+    n: u64,
+    noise: u32,
+}
+
+impl Read for Synth {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let frames = (buf.len() / FRAME_BYTES).min(1024);
+        for f in 0..frames {
+            let t = self.n as f32 / RATE as f32;
+            self.noise = self.noise.wrapping_mul(1664525).wrapping_add(1013904223);
+            let noise = (self.noise >> 8) as f32 / (1u32 << 24) as f32 - 0.5;
+            let env = 0.5 + 0.5 * (t * 2.3).sin() * (t * 0.7).cos();
+            let pitch = 140.0 + 30.0 * (t * 0.9).sin();
+            let voice: f32 = (1..8)
+                .map(|h| (2.0 * std::f32::consts::PI * pitch * h as f32 * t).sin() / h as f32)
+                .sum();
+            let burst = if (t % 6.0) < 0.15 { 2.5 } else { 1.0 };
+            let left = (0.18 * env * voice * burst + 0.01 * noise).clamp(-1.0, 1.0);
+            let right = (0.06 * (1.0 - env) * voice + 0.004 * noise).clamp(-1.0, 1.0);
+            for (c, v) in [left, right].into_iter().enumerate() {
+                let x = ((v * 8_388_607.0) as i32).to_le_bytes();
+                buf[f * FRAME_BYTES + 3 * c..f * FRAME_BYTES + 3 * c + 3].copy_from_slice(&x[..3]);
+            }
+            self.n += 1;
+        }
+        std::thread::sleep(std::time::Duration::from_secs_f64(
+            frames as f64 / RATE as f64,
+        ));
+        Ok(frames * FRAME_BYTES)
     }
 }
 
@@ -228,7 +311,8 @@ fn db(x: f32) -> f32 {
 fn read_loop(mut input: impl Read, shared: Arc<Mutex<Shared>>) {
     let mut buf = vec![0u8; 1024 * FRAME_BYTES];
     let mut carry: Vec<u8> = Vec::new();
-    let mut mono: Vec<f32> = Vec::with_capacity(FFT);
+    // [mix, left, right]
+    let mut bufs: [Vec<f32>; 3] = std::array::from_fn(|_| Vec::with_capacity(FFT * 2));
     let window: Vec<f32> = (0..FFT)
         .map(|i| 0.5 - 0.5 * (2.0 * std::f32::consts::PI * i as f32 / (FFT - 1) as f32).cos())
         .collect();
@@ -247,25 +331,28 @@ fn read_loop(mut input: impl Read, shared: Arc<Mutex<Shared>>) {
         // levels of this chunk
         let mut sum = [0f64; CHANNELS];
         let mut pk = [0f32; CHANNELS];
-        for f in chunk.chunks_exact(FRAME_BYTES) {
+        for f in chunk.as_chunks::<FRAME_BYTES>().0 {
             let mut m = 0.0;
-            for (c, s) in f.chunks_exact(3).enumerate() {
+            for (c, s) in f.as_chunks::<3>().0.iter().enumerate() {
                 let v = (i32::from_le_bytes([0, s[0], s[1], s[2]]) >> 8) as f32 / 8_388_608.0;
                 sum[c] += (v * v) as f64;
                 pk[c] = pk[c].max(v.abs());
                 m += v;
+                bufs[c + 1].push(v);
             }
-            mono.push(m / CHANNELS as f32);
+            bufs[0].push(m / CHANNELS as f32);
         }
         let frames = (chunk.len() / FRAME_BYTES) as f64;
         let now = Instant::now();
         let dt = now.duration_since(last).as_secs_f32();
         last = now;
-        let bands = (mono.len() >= FFT).then(|| {
-            let start = mono.len() - FFT;
-            let b = spectrum(&mono[start..], &window);
-            mono.drain(..start + FFT / 2); // half overlap
-            b
+        let spectra: Option<[Vec<f32>; 3]> = (bufs[0].len() >= FFT).then(|| {
+            std::array::from_fn(|i| {
+                let start = bufs[i].len() - FFT;
+                let b = spectrum(&bufs[i][start..], &window);
+                bufs[i].drain(..start + FFT / 2); // half overlap
+                b
+            })
         });
         let Ok(mut s) = shared.lock() else { break };
         for c in 0..CHANNELS {
@@ -274,9 +361,24 @@ fn read_loop(mut input: impl Read, shared: Arc<Mutex<Shared>>) {
             s.level[c] = rms.max(s.level[c] - DECAY_DB_PER_S * dt);
             s.peak[c] = peak.max(s.peak[c] - DECAY_DB_PER_S / 2.0 * dt);
         }
-        if let Some(b) = bands {
-            for (old, new) in s.bands.iter_mut().zip(b) {
-                *old = new.max(*old - DECAY_DB_PER_S * 2.0 * dt);
+        for (at, p) in s.clip_at.iter_mut().zip(pk) {
+            if p >= 0.891 {
+                *at = Some(now); // within 1 dB of full scale
+            }
+        }
+        if let Some(spectra) = spectra {
+            let sh = &mut *s;
+            for (i, new) in spectra.into_iter().enumerate() {
+                for (k, v) in new.into_iter().enumerate() {
+                    sh.bands[i][k] = v.max(sh.bands[i][k] - DECAY_DB_PER_S * 2.0 * dt);
+                    let held = now.duration_since(sh.held[i][k]).as_secs_f32();
+                    if v >= sh.tops[i][k] {
+                        sh.tops[i][k] = v;
+                        sh.held[i][k] = now;
+                    } else if held > HOLD {
+                        sh.tops[i][k] = (sh.tops[i][k] - TOP_FALL_DB_PER_S * dt).max(v);
+                    }
+                }
             }
         }
         if let Some(w) = s.recording.as_mut() {
@@ -431,7 +533,7 @@ mod hardware {
             "recorded {secs:.2} s, {len} bytes; level {:?} peak {:?}; bands {:?}",
             m.level,
             m.peak,
-            &m.bands[..6]
+            &m.bands[0][..6]
         );
         assert!(secs > 1.5 && secs < 2.5, "{secs}");
         assert_eq!((len - 44) % 6, 0);
@@ -441,5 +543,20 @@ mod hardware {
             len - 44
         );
         std::fs::remove_file(out).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod demo_signal {
+    #[test]
+    fn demo_meters_move() {
+        let l = super::Live::demo();
+        std::thread::sleep(std::time::Duration::from_millis(1500));
+        let m = l.meters();
+        eprintln!(
+            "level {:?} peak {:?} clipped {:?}",
+            m.level, m.peak, m.clipped
+        );
+        assert!(m.peak.iter().all(|p| *p > super::FLOOR), "{:?}", m.peak);
     }
 }
