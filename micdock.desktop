@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=MicDock
+GenericName=Wireless microphone manager
+Comment=Manage a RØDE Wireless GO II: recordings, record mode, firmware (unofficial)
+Exec=micdock
+TryExec=micdock
+Icon=audio-input-microphone
+Terminal=false
+Categories=AudioVideo;Audio;
+Keywords=RODE;RØDE;Wireless GO;microphone;recordings;lavalier;
+StartupWMClass=io.github.micdock.MicDock

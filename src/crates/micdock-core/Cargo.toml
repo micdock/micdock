@@ -1,0 +1,24 @@
+[package]
+name = "micdock-core"
+description = "Device logic for MicDock: RØDE Wireless GO II over Linux hidraw, recordings, storage mode"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+libc.workspace = true
+thiserror.workspace = true
+chrono.workspace = true
+filetime.workspace = true
+ureq.workspace = true
+serde_json.workspace = true
+md-5.workspace = true
+crc32fast.workspace = true
+regex.workspace = true
+sha1.workspace = true
+htmlize.workspace = true
+zip.workspace = true

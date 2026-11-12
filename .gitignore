@@ -1,0 +1,9 @@
+# build output
+src/target/
+
+# private working notes (not published)
+CLAUDE.md
+
+# editors
+.vscode/
+*.swp

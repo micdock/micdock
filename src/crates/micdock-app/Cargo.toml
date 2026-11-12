@@ -1,0 +1,27 @@
+[package]
+name = "micdock-app"
+description = "MicDock desktop app (libcosmic): manage a RØDE Wireless GO II on Linux"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "micdock"
+path = "src/main.rs"
+
+[dependencies]
+micdock-core.workspace = true
+chrono.workspace = true
+tokio = { version = "1", features = ["rt"] }
+serde_json.workspace = true
+futures = "0.3"
+png = "0.18"
+cpal = "0.18.2"
+
+[dependencies.libcosmic]
+git = "https://github.com/pop-os/libcosmic"
+features = ["about", "markdown"]

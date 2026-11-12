@@ -1,0 +1,29 @@
+[package]
+name = "micdock-cli"
+description = "MicDock command-line tools: rodego2 (device settings) and ugg2wav (recordings)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "rodego2"
+path = "src/bin/rodego2.rs"
+
+[[bin]]
+name = "ugg2wav"
+path = "src/bin/ugg2wav.rs"
+
+[[bin]]
+name = "micdock-firmware"
+path = "src/bin/micdock-firmware.rs"
+
+[dependencies]
+micdock-core.workspace = true
+clap.workspace = true
+anyhow.workspace = true
+chrono.workspace = true
+libc.workspace = true

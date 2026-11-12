@@ -1,0 +1,5 @@
+# RØDE devices (VID 19f7): let the logged-in user open the hidraw nodes,
+# so rodego2.py works without sudo.
+# Must be numbered below 73: TAG+="uaccess" is applied by 73-seat-late.rules.
+# Install:  sudo cp 70-rode.rules /etc/udev/rules.d/ && sudo udevadm control --reload && sudo udevadm trigger
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="19f7", MODE="0660", TAG+="uaccess"
