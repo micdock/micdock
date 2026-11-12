@@ -46,7 +46,7 @@ jobs:
           for i in 1 2 3 4 5; do dnf -y -q install git && break; dnf clean all; sleep 15; done
           git config --global --add safe.directory '*'
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
@@ -117,7 +117,7 @@ jobs:
           case "$GITHUB_REF" in refs/tags/v*) ;; *) version="$(git rev-parse --short HEAD)" ;; esac
           packaging/make-release.sh "$version"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: steps.changes.outputs.code == 'true'
         with:
           name: micdock-linux-${{ matrix.arch }}
@@ -132,9 +132,9 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           pattern: micdock-linux-*
           merge-multiple: true
@@ -157,7 +157,7 @@ jobs:
           EOF
 
       - name: Publish
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           name: MicDock ${{ github.ref_name }}
           body_path: notes.md
