@@ -25,7 +25,7 @@ crc32fast = "1"
 regex = "1"
 sha1 = "0.10"
 htmlize = { version = "1", features = ["unescape"] }
-zip = { version = "2", default-features = false, features = ["deflate"] }
+zip = { version = "9", default-features = false, features = ["deflate"] }
 micdock-core = { path = "crates/micdock-core" }
 
 [profile.release]
