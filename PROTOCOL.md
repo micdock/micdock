@@ -344,6 +344,16 @@ APK from a public mirror (XAPK, armeabi-v7a split), kept in `~/.cache/micdock-re
 - **Unexplained**: TX A's record mode and button changed (Always/None → Off/Mute) some time after it had been in
   USB storage mode, without a write from us or the user. Watch for it.
 
+## The receiver is a USB sound card only while it is on (2026-11-12)
+
+Switched off (charging) the RX enumerates with its HID interface only; switched on it adds three USB audio
+interfaces (class 01: control, streaming, and one vendor class ff/02) handled by `snd-usb-audio`, and the HID node
+stays. So `bInterfaceClass == 01` among its interfaces in sysfs = **the RX is on** — the RX power state that the
+HID protocol can't tell. Its PipeWire/PulseAudio source is
+`alsa_input.usb-R__DE_Wireless_GO_II_RX_<serial>-01.analog-stereo` (s24le, 2 ch, 48 kHz). Two `parec` captures
+of that source run side by side with identical data, so capturing through the sound server doesn't block other
+programs (opening the ALSA `hw:` device directly would).
+
 ## Reading a TX over USB blocks its power button (2026-11-12, tested with the user)
 
 With MicDock open, the TX's Ø/power button didn't work over USB (it did with MicDock closed, and on a charger).

@@ -150,6 +150,24 @@ linked to this receiver, with its name, battery level and whether its pad is on 
 computer. MicDock can't see whether the receiver itself is on: while it is off, both transmitters show as not
 linked. The sidebar shows the same state next to each transmitter.
 
+### Live audio and recording (receiver)
+
+The receiver is also a USB sound card — but only while it is switched on. Its **Live** tab shows what it outputs
+over USB:
+
+- **Level:** a meter per channel (in split mode: left = transmitter 1, right = transmitter 2) with the peak in dB.
+- **Spectrum:** 24 bands from 40 Hz to 20 kHz, to see at a glance whether there is sound, hum or wind noise.
+- **Record:** writes the receiver's USB audio (48 kHz, 24-bit, stereo) as a WAV file into the export folder,
+  named after the date and time. The recording continues when you switch to another page; **Stop recording**
+  ends it, and quitting MicDock closes the file properly too.
+
+MicDock listens through your sound server (PipeWire or PulseAudio), not directly on the device, so other programs
+— a video call, OBS, Audacity — can use the receiver at the same time. The output gain setting affects only the
+3.5 mm output, not this USB audio.
+
+MicDock also uses the sound card to tell whether the receiver is switched on: the sidebar and the header say
+*on* or *off*.
+
 ## Device
 
 ![The Device page of a transmitter: name, clock and firmware](img/device.png)

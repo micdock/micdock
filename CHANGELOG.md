@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.10.0
+
+- **Live audio from the receiver:** a new *Live* tab shows the receiver's USB audio with a level meter per
+  channel and a 24-band spectrum, and records it to a WAV file (48 kHz, 24-bit, stereo). MicDock listens through
+  PipeWire/PulseAudio, so other programs can use the receiver at the same time; the recording continues when you
+  switch pages.
+- **The receiver's on/off state:** MicDock now sees whether the receiver is switched on (it is a USB sound card
+  only then) and says so in the sidebar and the header; transmitters no longer show as "off" just because the
+  receiver is.
+- Donation link (Buy Me a Coffee) in the About panel and the manual.
+
 ## 0.9.0 — first public release
 
 MicDock manages a RØDE Wireless GO II on Linux, without RØDE's software.

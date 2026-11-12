@@ -9,7 +9,9 @@ MicDock does on Linux what RØDE's own apps do for the Wireless GO II:
 - set the on-board record mode (Always / Manual / Backup / Off), the Ø button (Mute / Marker / Record / None)
   and the transmitters' low-sensitivity pad;
 - set the receiver's output (merged / split), gain mode and level (coarse, fine, camera preset) and power saver;
-- show which transmitters are switched on (through the receiver), with their battery level;
+- show which transmitters are switched on (through the receiver), with their battery level, and whether the
+  receiver is on;
+- show the receiver's USB audio live (level meters, spectrum) and record it to WAV — shared with other programs;
 - rename the units, set their clocks, and check for, download and install firmware updates.
 
 It talks to the units over `/dev/hidraw*` and needs no RØDE software. The app is built with libcosmic and follows
