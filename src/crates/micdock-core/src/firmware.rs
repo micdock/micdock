@@ -203,25 +203,35 @@ pub fn download(
         )));
     }
     std::fs::rename(&part, &zpath)?;
-    let mut z = zip::ZipArchive::new(File::open(&zpath)?)
-        .map_err(|e| Error::other(format!("bad zip: {e}")))?;
+    extract_package(&zpath, &d)?;
+    std::fs::write(d.join(".verified"), format!("{want}\n"))?;
+    Ok(d)
+}
+
+/// Unpack a firmware package into `dir`. Paths inside the archive are never trusted: every file is written
+/// under its bare file name (no folders, no `..`). Returns the names written.
+pub fn extract_package(zip_path: &Path, dir: &Path) -> Result<Vec<String>> {
+    let bad = |e: zip::result::ZipError| Error::other(format!("bad zip: {e}"));
+    let mut z = zip::ZipArchive::new(File::open(zip_path)?).map_err(bad)?;
+    let mut written = Vec::new();
     for i in 0..z.len() {
-        let mut entry = z
-            .by_index(i)
-            .map_err(|e| Error::other(format!("bad zip: {e}")))?;
-        // never trust paths inside the archive: keep only the file name
-        let Some(base) = Path::new(entry.name()).file_name().map(|s| s.to_owned()) else {
+        let mut entry = z.by_index(i).map_err(bad)?;
+        if entry.is_dir() {
+            continue;
+        }
+        let name = entry.name().map_err(bad)?.into_owned();
+        let Some(base) = Path::new(&name).file_name().map(|s| s.to_owned()) else {
             continue;
         };
-        if entry.is_dir() || base.is_empty() {
+        if base.is_empty() || base == ".." {
             continue;
         }
         let mut data = Vec::new();
         entry.read_to_end(&mut data)?;
-        std::fs::write(d.join(base), data)?;
+        std::fs::write(dir.join(&base), data)?;
+        written.push(base.to_string_lossy().into_owned());
     }
-    std::fs::write(d.join(".verified"), format!("{want}\n"))?;
-    Ok(d)
+    Ok(written)
 }
 
 fn between<'a>(hay: &'a [u8], open: &[u8], close: &[u8]) -> Option<(&'a [u8], usize)> {
@@ -285,6 +295,88 @@ pub fn package_parts(d: &Path, unit: &str) -> Vec<(&'static str, PathBuf)> {
         }
     }
     parts
+}
+
+#[cfg(test)]
+mod zip_tests {
+    use super::*;
+    use std::io::Write;
+
+    fn tmp(name: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("micdock-zip-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    /// A package with a folder, a nested file and a path that tries to escape the target folder.
+    #[test]
+    fn extracts_files_flat_and_safely() {
+        let d = tmp("pkg");
+        let zpath = d.join("firmware.zip");
+        let mut w = zip::ZipWriter::new(File::create(&zpath).unwrap());
+        let opts = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated);
+        w.add_directory("pkg/", opts).unwrap();
+        w.start_file("pkg/wgo25_tx_2.5.0_ota.bin", opts).unwrap();
+        w.write_all(&[0xA5; 5000]).unwrap();
+        w.start_file("readme.txt", opts).unwrap();
+        w.write_all(b"hello").unwrap();
+        w.start_file("../escape.txt", opts).unwrap();
+        w.write_all(b"must stay inside").unwrap();
+        w.finish().unwrap();
+
+        let out = d.join("out");
+        std::fs::create_dir_all(&out).unwrap();
+        let mut names = extract_package(&zpath, &out).unwrap();
+        names.sort();
+        assert_eq!(
+            names,
+            ["escape.txt", "readme.txt", "wgo25_tx_2.5.0_ota.bin"]
+        );
+        assert_eq!(
+            std::fs::read(out.join("wgo25_tx_2.5.0_ota.bin")).unwrap(),
+            vec![0xA5; 5000]
+        );
+        assert_eq!(
+            std::fs::read(out.join("escape.txt")).unwrap(),
+            b"must stay inside"
+        );
+        assert!(
+            !d.join("escape.txt").exists(),
+            "nothing written outside the target folder"
+        );
+        std::fs::remove_dir_all(d).unwrap();
+    }
+
+    #[test]
+    fn rejects_a_broken_package() {
+        let d = tmp("broken");
+        std::fs::write(d.join("firmware.zip"), b"PK not really").unwrap();
+        assert!(extract_package(&d.join("firmware.zip"), &d).is_err());
+        std::fs::remove_dir_all(d).unwrap();
+    }
+
+    /// RØDE's real package, when it is in the cache (not in CI): unpacked again it must give exactly the
+    /// files that are already there (unpacked earlier, with the previous zip version).
+    #[test]
+    fn real_package_unpacks_identically_if_cached() {
+        let cached = fw_root().join("wgo2_5-2.5.0");
+        if !cached.join("firmware.zip").is_file() {
+            return;
+        }
+        let d = tmp("real");
+        let names = extract_package(&cached.join("firmware.zip"), &d).unwrap();
+        assert!(names.len() >= 4, "{names:?}");
+        for n in &names {
+            assert_eq!(
+                std::fs::read(d.join(n)).unwrap(),
+                std::fs::read(cached.join(n)).unwrap(),
+                "{n}"
+            );
+        }
+        std::fs::remove_dir_all(d).unwrap();
+    }
 }
 
 #[cfg(test)]
