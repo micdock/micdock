@@ -1,5 +1,7 @@
 # MicDock – manage a RØDE Wireless GO II on Linux
 
+[![build](https://github.com/micdock/micdock/actions/workflows/build.yml/badge.svg)](https://github.com/micdock/micdock/actions/workflows/build.yml)
+
 MicDock does on Linux what RØDE's own apps do for the Wireless GO II:
 
 - copy the transmitters' on-board recordings (`.WAV` and older `.UGG`) with correct dates, play them, and
@@ -15,6 +17,13 @@ the desktop theme; the manual and RØDE's user guide are available offline insid
 
 *MicDock is an unofficial project, not affiliated with or endorsed by RØDE Microphones. RØDE and
 Wireless GO are trademarks of their owner and are used here only to name the hardware MicDock works with.*
+
+## Download
+
+Ready-made builds for x86-64 Linux are on the [releases page](https://github.com/micdock/micdock/releases):
+unpack `micdock-<version>-x86_64-linux.tar.gz` and run `./install.sh` (for your user; it prints the one `sudo`
+command for the udev rule) or `sudo ./install.sh --system` (for everyone). `./install.sh --remove` uninstalls.
+What changed: [CHANGELOG.md](CHANGELOG.md).
 
 ## Build and install
 
@@ -80,6 +89,8 @@ src/                       Cargo workspace
   crates/micdock-app/      the desktop app (libcosmic): main, recordings, player, device, help, config, util
 docs/<lang>/manual.md      the user manual, shown in the app
 PROTOCOL.md                how the device protocol was worked out
+packaging/                 release archive (make-release.sh) and its installer (install.sh)
+.github/workflows/         CI: build, checks, tests; releases on v* tags
 70-rode.rules              udev rule for device access
 micdock.desktop            app-menu entry
 ```

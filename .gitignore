@@ -7,3 +7,4 @@ CLAUDE.md
 # editors
 .vscode/
 *.swp
+dist/
