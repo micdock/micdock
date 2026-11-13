@@ -29,6 +29,8 @@ Ready-made builds for Linux on x86-64 and 64-bit ARM (glibc 2.34 or newer: Ubunt
 RHEL/Alma/Rocky 9+, openSUSE, Arch, …) are on the [releases page](https://github.com/micdock/micdock/releases):
 unpack `micdock-<version>-<x86_64 or aarch64>-linux.tar.gz` and run `./install.sh` (for your user; it prints the one `sudo`
 command for the udev rule) or `sudo ./install.sh --system` (for everyone). `./install.sh --remove` uninstalls.
+On Arch Linux, install the AUR package instead: `yay -S micdock-bin` (or `paru`, or `makepkg -si` from
+[packaging/arch](packaging/arch)).
 What changed: [CHANGELOG.md](CHANGELOG.md).
 
 ## Build and install
@@ -99,6 +101,7 @@ src/                       Cargo workspace
 docs/<lang>/manual.md      the user manual, shown in the app
 PROTOCOL.md                how the device protocol was worked out
 packaging/                 release archive (make-release.sh) and its installer (install.sh)
+packaging/arch/            AUR package micdock-bin (PKGBUILD, update.sh)
 .github/workflows/         CI: build, checks, tests; releases on v* tags
 70-rode.rules              udev rule for device access
 micdock.desktop            app-menu entry
