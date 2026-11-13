@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use clap::{Parser, Subcommand};
 use micdock_core::hid::{self, ButtonMode, ChannelMode, Dev, DevInfo, RecMode, ERASE_PIDS};
-use micdock_core::Error;
+use micdock_core::{devices, Error};
 
 const ABOUT: &str = "\
 rodego2 - talk to a RØDE Wireless GO II (and related RØDE wireless devices)
@@ -95,6 +95,33 @@ enum Cmd {
         /// switch the gain mode
         #[arg(long, value_parser = ["coarse", "fine", "preset"])]
         mode: Option<String>,
+    },
+    /// RX safety channel (param 0x07): a 20 dB quieter copy on the 3.5 mm output in merged mode
+    Safety {
+        #[arg(value_parser = ["on", "off"])]
+        state: Option<String>,
+    },
+    /// RX power button, single click (param 0x0a): powersaver (toggle the backlight) or marker
+    Rxbutton {
+        #[arg(value_parser = ["powersaver", "marker"])]
+        mode: Option<String>,
+    },
+    /// a transmitter's settings through the receiver (pick the RX with --dev): show, or change some
+    Radio {
+        /// the receiver's TX slot
+        #[arg(value_parser = ["1", "2"])]
+        slot: String,
+        #[arg(long, value_parser = ["on", "off"])]
+        pad: Option<String>,
+        #[arg(long, value_parser = ["bright", "dim"])]
+        led: Option<String>,
+        #[arg(long, value_parser = ["off", "backup", "always", "button"])]
+        rec: Option<String>,
+        #[arg(long, value_parser = ["mute", "marker", "none", "record"])]
+        button: Option<String>,
+        /// recording format (used in backup mode)
+        #[arg(long, value_parser = ["compressed", "uncompressed"])]
+        format: Option<String>,
     },
     /// TX low-sensitivity pad / lav gain (param 0x0e): on = pad, off = normal
     Pad {
@@ -394,6 +421,93 @@ fn run(cli: Cli) -> Result<(), Error> {
                 (hid::PRESET_GAIN, _) => println!("gain: camera preset {}", g.step),
                 _ => println!("gain: mode {} step {}", g.mode, g.step),
             }
+        }
+        Cmd::Safety { state } => {
+            let mut d = open(&cli.dev)?;
+            if d.pid() != 0x002A {
+                return Err(Error::Other(
+                    "the safety channel is a receiver setting; pick the RX with --dev".into(),
+                ));
+            }
+            let on = match state.as_deref() {
+                Some(s) => hid::set_safety_channel(&mut d, s == "on")?,
+                None => hid::safety_channel(&mut d)?,
+            };
+            println!("safety channel: {}", if on { "on" } else { "off" });
+        }
+        Cmd::Rxbutton { mode } => {
+            let mut d = open(&cli.dev)?;
+            if d.pid() != 0x002A {
+                return Err(Error::Other(
+                    "this is the receiver's button; pick the RX with --dev".into(),
+                ));
+            }
+            let b = match mode.as_deref().and_then(hid::RxButton::parse) {
+                Some(b) => hid::set_rx_button(&mut d, b)?,
+                None => hid::rx_button(&mut d)?,
+            };
+            println!("receiver button: {}", b.as_str());
+        }
+        Cmd::Radio {
+            slot,
+            pad,
+            led,
+            rec,
+            button,
+            format,
+        } => {
+            let mut d = open(&cli.dev)?;
+            if d.pid() != 0x002A {
+                return Err(Error::Other(
+                    "transmitter settings go through the receiver; pick the RX with --dev".into(),
+                ));
+            }
+            let slot: u8 = slot.parse().unwrap_or(1);
+            let record_param = if slot == 1 { 0x0b } else { 0x0c };
+            let read = |d: &mut Dev| -> Result<devices::TxLink, Error> {
+                let v = hid::get_param(d, record_param)
+                    .map_err(|_| Error::Other(format!("no transmitter linked as TX{slot}")))?;
+                Ok(devices::decode_record(&v))
+            };
+            let cur = read(&mut d)?;
+            if let Some(p) = pad {
+                hid::radio_set_pad(&mut d, slot, p == "on")?;
+            }
+            if let Some(l) = led {
+                hid::radio_set_led(&mut d, slot, l == "dim")?;
+            }
+            if rec.is_some() || button.is_some() || format.is_some() {
+                let r = rec
+                    .as_deref()
+                    .and_then(RecMode::parse)
+                    .or(cur.rec)
+                    .unwrap_or(RecMode::Off);
+                let b = button
+                    .as_deref()
+                    .and_then(ButtonMode::parse)
+                    .or(cur.button)
+                    .unwrap_or(ButtonMode::Mute);
+                let unc = format
+                    .map(|f| f == "uncompressed")
+                    .or(cur.uncompressed)
+                    .unwrap_or(true);
+                hid::radio_set_settings(&mut d, slot, r, b, unc)?;
+            }
+            std::thread::sleep(Duration::from_millis(1500)); // the record catches up over the radio link
+            let t = read(&mut d)?;
+            let name = |o: Option<&str>| o.unwrap_or("?").to_string();
+            println!(
+                "TX{slot}: firmware {}  record {}  button {}  format {}  pad {}  LEDs {}",
+                t.firmware,
+                name(t.rec.map(|m| m.as_str())),
+                name(t.button.map(|m| m.as_str())),
+                name(
+                    t.uncompressed
+                        .map(|u| if u { "uncompressed" } else { "compressed" })
+                ),
+                name(t.pad.map(|p| if p { "on" } else { "off" })),
+                name(t.led_dim.map(|d| if d { "dim" } else { "bright" })),
+            );
         }
         Cmd::Pad { state } => {
             let mut d = open(&cli.dev)?;

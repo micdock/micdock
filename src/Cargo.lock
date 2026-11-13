@@ -3395,7 +3395,7 @@ dependencies = [
 
 [[package]]
 name = "micdock-app"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "chrono",
  "cpal",
@@ -3409,7 +3409,7 @@ dependencies = [
 
 [[package]]
 name = "micdock-cli"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -3420,7 +3420,7 @@ dependencies = [
 
 [[package]]
 name = "micdock-core"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "chrono",
  "crc32fast",

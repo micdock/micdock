@@ -14,9 +14,9 @@ use cosmic::iced::{Alignment, Length, Size};
 use cosmic::prelude::*;
 use cosmic::widget::{self, nav_bar, segmented_button, settings};
 use cosmic::{executor, iced, Core};
-use micdock_core::devices::{self, DeviceStatus, Role, TxLink};
+use micdock_core::devices::{self, DeviceStatus, RadioChange, Role, TxLink};
 use micdock_core::hid::{
-    ButtonMode, ChannelMode, Gain, RecMode, COARSE_GAIN, FINE_GAIN, PRESET_GAIN,
+    ButtonMode, ChannelMode, Gain, RecMode, RxButton, COARSE_GAIN, FINE_GAIN, PRESET_GAIN,
 };
 
 mod config;
@@ -87,6 +87,10 @@ pub enum Message {
     SetGain(String, Gain),
     /// Transmitter low-sensitivity pad.
     SetPad(String, bool),
+    SetSafety(String, bool),
+    SetRxButton(String, RxButton),
+    /// A transmitter setting sent through a receiver: (receiver serial, TX slot, change).
+    Radio(String, u8, RadioChange),
     /// A setting was written (or failed): text for the status line.
     Done(Result<String, String>),
     Rec(RecMsg),
@@ -257,6 +261,9 @@ const CHANNEL_CHOICES: [(ChannelMode, &str); 2] = [
 ];
 
 /// Fine-gain steps 0–10 = −30 to 0 dB.
+const RX_BUTTON_LABELS: [&str; 2] = ["Power saver on/off", "Marker"];
+const FORMAT_LABELS: [&str; 2] = ["Uncompressed (WAV)", "Compressed (Backup only)"];
+const LED_LABELS: [&str; 2] = ["Bright", "Dim"];
 const GAIN_MODES: [&str; 3] = ["Coarse", "Fine", "Camera preset"];
 const COARSE_LABELS: [&str; 3] = ["−24 dB", "−12 dB", "0 dB"];
 const GAIN_LABELS: [&str; 11] = [
@@ -417,6 +424,110 @@ impl App {
             }
             (None, _) => self.live = None,
         }
+    }
+
+    /// The receiver and slot a transmitter is linked to (for settings over the radio link).
+    fn radio_target(&self, tx_serial: &str) -> Option<(String, u8, &TxLink)> {
+        self.units
+            .values()
+            .filter(|u| u.role == Role::Rx && u.error.is_none())
+            .find_map(|rx| {
+                rx.links
+                    .iter()
+                    .find(|l| l.serial == tx_serial)
+                    .map(|l| (rx.serial.clone(), l.slot, l))
+            })
+    }
+
+    /// Settings of a linked transmitter, sent through the receiver: record mode, button, format, pad, LEDs.
+    fn radio_items<'a>(
+        &self,
+        rx: &str,
+        slot: u8,
+        l: &TxLink,
+        mut sec: settings::Section<'a, Message>,
+    ) -> settings::Section<'a, Message> {
+        let (rec, button, unc) = (
+            l.rec.unwrap_or(RecMode::Off),
+            l.button.unwrap_or(ButtonMode::Mute),
+            l.uncompressed.unwrap_or(true),
+        );
+        let send = move |rx: &str, c: RadioChange| Message::Radio(rx.to_string(), slot, c);
+        let r = rx.to_string();
+        sec = sec.add(settings::item(
+            "Record",
+            widget::dropdown(
+                labels(&REC_CHOICES),
+                index_of(&REC_CHOICES, l.rec),
+                move |i| send(&r, RadioChange::Settings(REC_CHOICES[i].0, button, unc)),
+            ),
+        ));
+        let r = rx.to_string();
+        sec = sec.add(settings::item(
+            "Ø button",
+            widget::dropdown(
+                labels(&BUTTON_CHOICES),
+                index_of(&BUTTON_CHOICES, l.button),
+                move |i| send(&r, RadioChange::Settings(rec, BUTTON_CHOICES[i].0, unc)),
+            ),
+        ));
+        let r = rx.to_string();
+        let format: Element<'a, Message> = if rec == RecMode::Backup {
+            widget::dropdown(
+                &FORMAT_LABELS[..],
+                l.uncompressed.map(|u| (!u) as usize),
+                move |i| send(&r, RadioChange::Settings(rec, button, i == 0)),
+            )
+            .into()
+        } else {
+            // Always and Manual record uncompressed only
+            widget::text::body("Uncompressed (WAV)").into()
+        };
+        sec = sec.add(settings::item("Recording format", format));
+        if let Some(pad) = l.pad {
+            let r = rx.to_string();
+            sec = sec.add(settings::item(
+                "Low-sensitivity pad",
+                widget::toggler(pad).on_toggle(move |v| send(&r, RadioChange::Pad(v))),
+            ));
+        }
+        let r = rx.to_string();
+        sec.add(settings::item(
+            "LEDs",
+            widget::dropdown(&LED_LABELS[..], l.led_dim.map(|d| d as usize), move |i| {
+                send(&r, RadioChange::LedDim(i == 1))
+            }),
+        ))
+    }
+
+    fn linked_tx_section<'a>(
+        &'a self,
+        rx: &str,
+        slot: u8,
+        link: Option<&'a TxLink>,
+    ) -> Element<'a, Message> {
+        let Some(l) = link else {
+            return settings::section()
+                .title(format!("TX{slot}"))
+                .add(widget::text::body("not linked (off or out of range)"))
+                .into();
+        };
+        let name = if l.name.is_empty() {
+            "(no name)".to_string()
+        } else {
+            l.name.clone()
+        };
+        let mut state = "on".to_string();
+        if let Some(b) = l.battery {
+            state.push_str(&format!(" · battery {b} %"));
+        }
+        if !l.firmware.is_empty() {
+            state.push_str(&format!(" · firmware {}", l.firmware));
+        }
+        let sec = settings::section()
+            .title(format!("TX{slot} · {name}"))
+            .add(widget::text::caption(state));
+        self.radio_items(rx, slot, l, sec).into()
     }
 
     /// The receiver's Live tab: level meters, spectrum and recording.
@@ -771,7 +882,7 @@ impl App {
             .into()
     }
 
-    fn audio_page(&self, u: &DeviceStatus) -> Element<'_, Message> {
+    fn audio_page<'a>(&'a self, u: &'a DeviceStatus) -> Element<'a, Message> {
         let serial = u.serial.clone();
         let mut col = widget::column::with_capacity(2).spacing(cosmic::theme::spacing().space_m);
         match u.role {
@@ -824,6 +935,54 @@ impl App {
                             )),
                     );
                 }
+                // LEDs and the recording format can only be set through a receiver it is linked to
+                let mut more = settings::section().title("LEDs and recording format");
+                match self.radio_target(&u.serial) {
+                    Some((rx, slot, l)) => {
+                        let (rec, button) = (
+                            l.rec.unwrap_or(RecMode::Off),
+                            l.button.unwrap_or(ButtonMode::Mute),
+                        );
+                        let r = rx.clone();
+                        more = more.add(settings::item(
+                            "LEDs",
+                            widget::dropdown(
+                                &LED_LABELS[..],
+                                l.led_dim.map(|d| d as usize),
+                                move |i| {
+                                    Message::Radio(r.clone(), slot, RadioChange::LedDim(i == 1))
+                                },
+                            ),
+                        ));
+                        let format: Element<'_, Message> = if rec == RecMode::Backup {
+                            widget::dropdown(
+                                &FORMAT_LABELS[..],
+                                l.uncompressed.map(|u| (!u) as usize),
+                                move |i| {
+                                    Message::Radio(
+                                        rx.clone(),
+                                        slot,
+                                        RadioChange::Settings(rec, button, i == 0),
+                                    )
+                                },
+                            )
+                            .into()
+                        } else {
+                            widget::text::body("Uncompressed (WAV)").into()
+                        };
+                        more = more.add(settings::item("Recording format", format)).add(widget::text::caption(
+                            "Set through the receiver. Compressed recording holds about 40 hours instead of 7, and is \
+                             only possible in Backup mode.",
+                        ));
+                    }
+                    None => {
+                        more = more.add(widget::text::caption(
+                            "Switch the transmitter on and link it to a receiver connected to this computer to set \
+                             its LEDs and recording format.",
+                        ));
+                    }
+                }
+                col = col.push(more);
             }
             _ => {
                 let s = serial.clone();
@@ -896,42 +1055,56 @@ impl App {
                             .on_toggle(move |v| Message::SetPowerSaver(s.clone(), v)),
                     ));
                 }
+                if let Some(b) = u.rx_button {
+                    let s = serial.clone();
+                    out = out.add(settings::item(
+                        "Ø button (single click)",
+                        widget::dropdown(
+                            &RX_BUTTON_LABELS[..],
+                            Some((b == RxButton::Marker) as usize),
+                            move |i| {
+                                Message::SetRxButton(
+                                    s.clone(),
+                                    if i == 1 {
+                                        RxButton::Marker
+                                    } else {
+                                        RxButton::PowerSaver
+                                    },
+                                )
+                            },
+                        ),
+                    ));
+                }
+                if let Some(on) = u.safety {
+                    let s = serial.clone();
+                    let merged = u.channel == Some(ChannelMode::Merged);
+                    out = out.add(settings::item(
+                        "Safety channel",
+                        widget::toggler(on).on_toggle_maybe(
+                            merged.then_some(move |v| Message::SetSafety(s.clone(), v)),
+                        ),
+                    ));
+                }
                 col = col.push(out.add(widget::text::caption(
                     "Output gain affects the 3.5 mm output only, not USB. Coarse: three steps; fine: 3 dB steps; \
                      camera preset: presets loaded with RØDE's app, picked with the receiver's gain button. \
                      Power saver turns the screen's backlight off \
-                     after 10 seconds; a single click on the receiver's power button switches it too.",
+                     after 10 seconds. The Ø button's single click switches the power saver or drops a marker into \
+                     the transmitters' recordings. Safety channel (Merged only): a second channel 20 dB quieter on \
+                     the 3.5 mm output, as a backup when the main channel clips.",
                 )));
-                // which transmitters are on: the receiver's link records
-                let mut txs = settings::section().title("Transmitters");
+                // the linked transmitters: state from the receiver's records, settings over its radio link
                 for slot in [1u8, 2] {
-                    let value = match u.links.iter().find(|l| l.slot == slot) {
-                        Some(l) => {
-                            let name = if l.name.is_empty() {
-                                "(no name)".to_string()
-                            } else {
-                                l.name.clone()
-                            };
-                            let mut v = match l.battery {
-                                Some(b) => format!("{name} — on, battery {b} %"),
-                                None => format!("{name} — on"),
-                            };
-                            if l.pad == Some(true) {
-                                v.push_str(", pad on");
-                            }
-                            v
-                        }
-                        None => "not linked (off or out of range)".into(),
-                    };
-                    txs = txs.add(settings::item(
-                        format!("TX{slot}"),
-                        widget::text::body(value),
+                    col = col.push(self.linked_tx_section(
+                        &serial,
+                        slot,
+                        u.links.iter().find(|l| l.slot == slot),
                     ));
                 }
-                col = col.push(txs.add(widget::text::caption(
-                    "A transmitter shows as on while it is linked to this receiver. The receiver's own on/off state \
-                     can't be read over USB: while it is off, both transmitters show as not linked.",
-                )));
+                col = col.push(widget::text::caption(
+                    "Settings for a linked transmitter go through the receiver, so the transmitter doesn't have to \
+                     be connected to the computer. A transmitter shows as on while it is linked to this receiver.",
+                ));
             }
         }
         col.into()
@@ -1377,6 +1550,68 @@ impl cosmic::Application for App {
                             Some(db) => format!("Output gain: {db} dB"),
                             None => "Output gain: camera preset".into(),
                         })
+                    },
+                    |r| Message::Done(r.map_err(|e| e.to_string())),
+                );
+            }
+            Message::SetSafety(serial, on) => {
+                self.busy = true;
+                self.generation += 1;
+                if let Some(u) = self.units.get_mut(&serial) {
+                    u.safety = Some(on);
+                }
+                return blocking(
+                    move || {
+                        devices::set_safety_channel(&serial, on)
+                            .map(|on| format!("Safety channel: {}", if on { "on" } else { "off" }))
+                    },
+                    |r| Message::Done(r.map_err(|e| e.to_string())),
+                );
+            }
+            Message::SetRxButton(serial, b) => {
+                self.busy = true;
+                self.generation += 1;
+                if let Some(u) = self.units.get_mut(&serial) {
+                    u.rx_button = Some(b);
+                }
+                return blocking(
+                    move || {
+                        devices::set_rx_button(&serial, b).map(|b| {
+                            format!(
+                                "Receiver button: {}",
+                                if b == RxButton::Marker {
+                                    "marker"
+                                } else {
+                                    "power saver"
+                                }
+                            )
+                        })
+                    },
+                    |r| Message::Done(r.map_err(|e| e.to_string())),
+                );
+            }
+            Message::Radio(rx, slot, change) => {
+                self.busy = true;
+                self.generation += 1;
+                if let Some(l) = self
+                    .units
+                    .get_mut(&rx)
+                    .and_then(|u| u.links.iter_mut().find(|l| l.slot == slot))
+                {
+                    match change {
+                        RadioChange::Pad(on) => l.pad = Some(on),
+                        RadioChange::LedDim(d) => l.led_dim = Some(d),
+                        RadioChange::Settings(r, b, unc) => {
+                            l.rec = Some(r);
+                            l.button = Some(b);
+                            l.uncompressed = Some(unc);
+                        }
+                    }
+                }
+                return blocking(
+                    move || {
+                        devices::set_via_receiver(&rx, slot, change)
+                            .map(|_| format!("TX{slot}: setting sent through the receiver"))
                     },
                     |r| Message::Done(r.map_err(|e| e.to_string())),
                 );

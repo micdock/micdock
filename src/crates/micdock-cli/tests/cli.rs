@@ -70,6 +70,9 @@ fn rodego2_lists_its_commands() {
         "gain",
         "powersaver",
         "erase",
+        "safety",
+        "rxbutton",
+        "radio",
     ] {
         assert!(t.contains(cmd), "--help lacks {cmd}");
     }

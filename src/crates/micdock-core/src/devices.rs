@@ -9,7 +9,7 @@ use std::process::Command;
 use std::thread::sleep;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use crate::hid::{self, ButtonMode, ChannelMode, Dev, DevInfo, Gain, RecMode};
+use crate::hid::{self, ButtonMode, ChannelMode, Dev, DevInfo, Gain, RecMode, RxButton};
 use crate::{Error, Result};
 
 pub const TX_PID: u16 = 0x0029;
@@ -153,6 +153,15 @@ pub struct TxLink {
     pub name: String,
     /// Record byte 21 = the TX's lav gain (0 = pad on; changed with the pad switched on the receiver).
     pub pad: Option<bool>,
+    /// Firmware, record bytes 8–9 (`50 02` = 2.5.0).
+    pub firmware: String,
+    /// Record mode and button function (bytes 14, 15, 17, 20 and 26).
+    pub rec: Option<RecMode>,
+    pub button: Option<ButtonMode>,
+    /// Byte 16: 1 = uncompressed (the recording format; it matters in Backup mode).
+    pub uncompressed: Option<bool>,
+    /// Byte 18: the LED setting (0xFE dim, 0xDF bright).
+    pub led_dim: Option<bool>,
     /// Record byte 22 (matched the TX's own battery reading, 100 %, in the one sample we have).
     pub battery: Option<u8>,
 }
@@ -183,6 +192,10 @@ pub struct DeviceStatus {
     pub pad: Option<bool>,
     /// Receiver: switched on (it offers its USB sound card only then). `None` for transmitters.
     pub powered: Option<bool>,
+    /// Receiver: safety channel (Merged mode, 3.5 mm output).
+    pub safety: Option<bool>,
+    /// Receiver: what its power button's single click does.
+    pub rx_button: Option<RxButton>,
     /// Receiver: power saver on (backlight off after 10 s).
     pub power_saver: Option<bool>,
     /// Receiver: output gain.
@@ -255,6 +268,8 @@ fn probe_devices_ex(full: bool, read_tx: bool) -> Vec<DeviceStatus> {
             gain: None,
             pad: None,
             powered: (Role::of(info.pid) == Role::Rx).then(|| has_audio_interface(&udir)),
+            safety: None,
+            rx_button: None,
         };
         if !read_tx && st.role == Role::Tx {
             out.push(st);
@@ -304,13 +319,67 @@ fn probe_one(info: &DevInfo, st: &mut DeviceStatus, full: bool) -> Result<()> {
         Role::Rx => {
             st.channel = hid::channel_mode(&mut d).ok();
             if full {
+                // like the power saver, the receiver's button setting is only read when needed
                 st.power_saver = hid::power_saver(&mut d).ok();
+                st.rx_button = hid::rx_button(&mut d).ok();
             }
+            st.safety = hid::safety_channel(&mut d).ok();
             st.gain = hid::gain(&mut d).ok();
         }
         Role::Other => {}
     }
     Ok(())
+}
+
+/// What a TX status record (RX params 0x0b/0x0c) says about the transmitter's settings. Byte meanings
+/// verified 2026-11-13 by changing each setting over the radio link and reading the record and the TX:
+/// 14 button active, 15 recording on (Always/Backup), 16 uncompressed, 17 Always, 18 LEDs, 20 marker,
+/// 21 pad (1 = normal), 22 battery, 26 Manual (the button records).
+pub fn decode_record(v: &[u8]) -> TxLink {
+    let at = |i: usize| v.get(i).copied();
+    let manual = at(26) == Some(1);
+    let rec = at(17).map(|always| {
+        if manual {
+            RecMode::Button
+        } else if always == 1 {
+            RecMode::Always
+        } else if at(15) == Some(1) {
+            RecMode::Backup
+        } else {
+            RecMode::Off
+        }
+    });
+    let button = at(14).map(|active| {
+        if manual {
+            ButtonMode::Record
+        } else if at(20) == Some(1) {
+            ButtonMode::Marker
+        } else if active == 1 {
+            ButtonMode::Mute
+        } else {
+            ButtonMode::None
+        }
+    });
+    TxLink {
+        slot: 0,
+        serial: String::new(),
+        id: 0,
+        name: String::new(),
+        battery: at(22).filter(|b| *b <= 100),
+        pad: at(21).filter(|b| *b <= 1).map(|b| b == 0),
+        firmware: match (at(8), at(9)) {
+            (Some(lo), Some(hi)) => format!("{hi}.{}.{}", lo >> 4, lo & 0x0f),
+            _ => String::new(),
+        },
+        rec,
+        button,
+        uncompressed: at(16).map(|b| b == 1),
+        led_dim: match at(18) {
+            Some(hid::LED_DIM) => Some(true),
+            Some(hid::LED_BRIGHT) => Some(false),
+            _ => None,
+        },
+    }
 }
 
 /// The receiver's linked transmitters (read-only GETs; an empty slot is refused at once).
@@ -320,7 +389,7 @@ fn read_links(d: &mut Dev) -> Vec<TxLink> {
         let Ok(v) = hid::get_param_ex(d, record, 0, 0.5, None) else {
             continue;
         };
-        if v.len() < 23 {
+        if v.len() < 27 {
             continue;
         }
         let name = hid::get_param_ex(d, name_param, 0, 0.5, None)
@@ -335,8 +404,7 @@ fn read_links(d: &mut Dev) -> Vec<TxLink> {
             serial: format!("{:08X}", u32::from_le_bytes([v[0], v[1], v[2], v[3]])),
             id: u32::from_le_bytes([v[4], v[5], v[6], v[7]]),
             name,
-            battery: Some(v[22]).filter(|b| *b <= 100),
-            pad: (v[21] <= 1).then_some(v[21] == 0),
+            ..decode_record(&v)
         });
     }
     out
@@ -627,6 +695,35 @@ pub fn set_channel_mode(serial: &str, mode: ChannelMode) -> Result<ChannelMode> 
 }
 
 /// Name a unit (up to 21 bytes of UTF-8).
+pub fn set_safety_channel(serial: &str, on: bool) -> Result<bool> {
+    hid::set_safety_channel(&mut open_by_serial(serial)?, on)
+}
+
+pub fn set_rx_button(serial: &str, b: RxButton) -> Result<RxButton> {
+    hid::set_rx_button(&mut open_by_serial(serial)?, b)
+}
+
+/// A change to a transmitter, sent through the receiver (works with or without the TX on USB).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum RadioChange {
+    Pad(bool),
+    LedDim(bool),
+    /// Record mode, button function, uncompressed.
+    Settings(RecMode, ButtonMode, bool),
+}
+
+/// Apply a change to the TX linked in `slot` of the receiver `rx_serial`.
+pub fn set_via_receiver(rx_serial: &str, slot: u8, change: RadioChange) -> Result<()> {
+    let mut d = open_by_serial(rx_serial)?;
+    match change {
+        RadioChange::Pad(on) => hid::radio_set_pad(&mut d, slot, on),
+        RadioChange::LedDim(dim) => hid::radio_set_led(&mut d, slot, dim),
+        RadioChange::Settings(rec, button, unc) => {
+            hid::radio_set_settings(&mut d, slot, rec, button, unc)
+        }
+    }
+}
+
 pub fn set_power_saver(serial: &str, on: bool) -> Result<bool> {
     hid::set_power_saver(&mut open_by_serial(serial)?, on)
 }
@@ -717,5 +814,55 @@ mod tests {
         assert_eq!(p.len(), 0x16);
         assert_eq!(&p[..20], "ØØØØØØØØØØ".as_bytes());
         assert_eq!(p[20], 0);
+    }
+}
+
+#[cfg(test)]
+mod record_tests {
+    use super::*;
+
+    fn rec(hex: &str) -> Vec<u8> {
+        hex.split_whitespace()
+            .map(|b| u8::from_str_radix(b, 16).unwrap())
+            .collect()
+    }
+
+    /// Real records from 2026-11-13 (a TX in Off + Mute, one in Always, and the same TX in Manual).
+    #[test]
+    fn decodes_transmitter_records() {
+        let off_mute = decode_record(&rec(
+            "8f 45 88 22 17 e3 f2 6a 50 02 01 00 00 00 01 00 01 00 df 00 00 01 3d 29 00 00 00 16",
+        ));
+        assert_eq!(off_mute.firmware, "2.5.0");
+        assert_eq!(
+            (off_mute.rec, off_mute.button),
+            (Some(RecMode::Off), Some(ButtonMode::Mute))
+        );
+        assert_eq!(
+            (off_mute.uncompressed, off_mute.led_dim),
+            (Some(true), Some(false))
+        );
+
+        let always = decode_record(&rec(
+            "95 45 88 22 55 e2 f2 6a 50 02 01 00 00 00 00 01 01 01 df 00 00 01 64 29 00 00 00 16",
+        ));
+        assert_eq!(
+            (always.rec, always.button),
+            (Some(RecMode::Always), Some(ButtonMode::None))
+        );
+
+        let manual = decode_record(&rec(
+            "8f 45 88 22 17 e3 f2 6a 50 02 01 00 00 00 01 00 01 00 df 00 00 01 3d 29 00 00 01 16",
+        ));
+        assert_eq!(
+            (manual.rec, manual.button),
+            (Some(RecMode::Button), Some(ButtonMode::Record))
+        );
+
+        let marker_dim = decode_record(&rec(
+            "8f 45 88 22 17 e3 f2 6a 50 02 01 00 00 00 01 00 01 00 fe 00 01 01 3d 29 00 00 00 16",
+        ));
+        assert_eq!(marker_dim.button, Some(ButtonMode::Marker));
+        assert_eq!(marker_dim.led_dim, Some(true));
     }
 }

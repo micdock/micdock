@@ -68,6 +68,12 @@ Good to know:
 Choosing another function than *Record* while the transmitter is in Manual mode switches on-board recording off,
 because the button would no longer be able to start a recording.
 
+### LEDs and recording format (transmitters)
+
+**LEDs and recording format** on a transmitter's Audio page set its LED brightness (bright or dim) and, in
+Backup mode, whether it records compressed (about 40 hours) or uncompressed WAV (about 7 hours). These go
+through a receiver the transmitter is linked to, so the receiver has to be connected and switched on.
+
 ### Low-sensitivity pad (transmitters)
 
 Under **Input** on a transmitter's **Audio** page, **Low-sensitivity pad** lowers the sensitivity of the built-in
@@ -145,10 +151,15 @@ Under **Receiver** on the same page:
 - **Power saver:** when on, the screen's backlight turns off after 10 seconds without use. A single click on the
   receiver's power button switches it too.
 
-Under **Transmitters** you see which transmitters are switched on: a transmitter shows as **on** while it is
-linked to this receiver, with its name, battery level and whether its pad is on — also a transmitter that isn't connected to your
-computer. MicDock can't see whether the receiver itself is on: while it is off, both transmitters show as not
-linked. The sidebar shows the same state next to each transmitter.
+Also under **Receiver**: **Ø button (single click)** chooses whether a click on the receiver's power button
+switches the power saver or drops a marker into the transmitters' recordings, and **Safety channel** (Merged mode
+only) adds a second channel 20 dB quieter on the 3.5 mm output, as a backup when the main one distorts.
+
+Under **Transmitters** you see each linked transmitter — the receiver tells MicDock which are switched on, with
+their battery level and firmware — and you can set it **through the receiver**, without connecting it to the
+computer: **Record** mode, **Ø button**, **Recording format** (compressed recording holds about 40 hours instead
+of 7, and is only possible in Backup mode), **Low-sensitivity pad** and **LEDs** (bright or dim). MicDock can't
+see whether the receiver itself is switched on when it isn't a sound card: then no transmitter shows as linked.
 
 ### Live audio and recording (receiver)
 
@@ -228,8 +239,7 @@ These settings and tools of RØDE's own app are not available in MicDock:
 - editing recordings (waveform view, trimming, level adjustments), and renaming or deleting single recordings
   on the transmitter (deleting all of them is possible, see [Deleting recordings](#deleting-recordings)); use
   your audio editor after exporting,
-- the safety channel, adding or editing camera presets, the transmitters' LED brightness and the choice between
-  compressed and uncompressed recording,
+- adding or editing camera presets,
 - switching units on or off (RØDE's apps can't do that either).
 
 Settings you made with RØDE's app stay in the units; MicDock leaves them as they are.
