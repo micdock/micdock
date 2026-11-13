@@ -136,7 +136,7 @@ all tests; `--quick` skips the tests). `scripts/install-hooks.sh` makes `git pus
 CI runs on pull requests (required before merging into `main`), on `main` and on release tags, for x86-64 and
 ARM64 — not on every branch push. A newer push to a pull request cancels the older run, and a pull request that
 only changes documentation skips the build. To build a branch without a pull request: Actions → build →
-*Run workflow*. The tests need no hardware: they use synthetic
+*Run workflow*. CodeQL code scanning runs only on pushes to `main` (`.github/workflows/codeql.yml`). The tests need no hardware: they use synthetic
 recordings (`micdock_core::testdata`, laid out like the transmitter writes them), run the command-line tools as a
 user would, and simulate the firmware installer. A few tests use real hardware and only run on request:
 
