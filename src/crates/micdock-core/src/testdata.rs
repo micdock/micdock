@@ -17,8 +17,8 @@ pub const RATE: u32 = 48000;
 
 /// `n` samples of a quiet 24-bit test signal (different for each `seed`).
 pub fn samples(n: usize, seed: i32) -> Vec<i32> {
-    (0..n as i32)
-        .map(|i| ((i * 7919 + seed * 104_729) % 600_000) - 300_000)
+    (0..n as i64)
+        .map(|i| (((i * 7919 + seed as i64 * 104_729) % 600_000) - 300_000) as i32)
         .collect()
 }
 

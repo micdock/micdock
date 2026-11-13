@@ -104,6 +104,10 @@ pub enum RecMsg {
     Stop,
     SeekDrag(f64),
     SeekRelease,
+    /// Jump to this position (frames), e.g. a marker.
+    SeekTo(u64),
+    PrevMarker,
+    NextMarker,
     /// Time to redraw the player's position.
     Tick,
     /// A worker failed unexpectedly.
@@ -113,6 +117,7 @@ pub enum RecMsg {
     Format(usize),
     Preset(usize),
     Join(bool),
+    Labels(bool),
     Export(String),
     Progress(f32, String),
     Exported(Result<(usize, usize, bool, String), String>),
@@ -132,6 +137,52 @@ pub const MP3_PRESETS: [&str; 6] = [
     "CBR 192 kbps",
     "CBR 128 kbps",
 ];
+
+/// Short accent-coloured ticks at the markers' places, to sit under the seek slider.
+fn marker_ticks<'a>(markers: &[u64], total: u64) -> Element<'a, Message> {
+    let tick = || {
+        cosmic::theme::Container::custom(|t: &cosmic::Theme| {
+            let c: cosmic::iced::Color = t.cosmic().accent_color().into();
+            cosmic::iced::widget::container::Style {
+                background: Some(c.into()),
+                border: cosmic::iced::border::rounded(1),
+                ..Default::default()
+            }
+        })
+    };
+    let mut row = widget::row::with_capacity(markers.len() * 2 + 1)
+        .height(Length::Fixed(6.0))
+        .width(Length::Fill);
+    let gaps = tick_gaps(markers, total);
+    let (rest, before) = gaps.split_last().expect("one gap more than markers");
+    for gap in before {
+        row = row
+            .push(widget::Space::new().width(Length::FillPortion(*gap)))
+            .push(
+                widget::container(widget::Space::new())
+                    .width(Length::Fixed(2.0))
+                    .height(Length::Fill)
+                    .class(tick()),
+            );
+    }
+    row.push(widget::Space::new().width(Length::FillPortion(*rest)))
+        .into()
+}
+
+/// Widths (as fill portions out of 10 000) of the gaps before each marker and after the last one.
+fn tick_gaps(markers: &[u64], total: u64) -> Vec<u16> {
+    let total = total.max(1);
+    let scale = |f: u64| (f.min(total) * 10_000 / total) as u16;
+    let mut out = Vec::with_capacity(markers.len() + 1);
+    let mut last = 0;
+    for &m in markers {
+        let at = scale(m).max(last);
+        out.push(at - last);
+        last = at;
+    }
+    out.push(10_000 - last);
+    out
+}
 
 fn mp3_preset_args(i: usize) -> Vec<String> {
     match i {
@@ -480,6 +531,26 @@ impl Recordings {
                     p.seek(v as u64);
                 }
             }
+            RecMsg::SeekTo(frame) => {
+                self.drag = None;
+                if let Some((_, _, p)) = &self.player {
+                    p.seek(frame);
+                }
+            }
+            RecMsg::PrevMarker => {
+                if let Some((_, _, p)) = &self.player {
+                    self.drag = None;
+                    p.seek(p.prev_marker(p.position()));
+                }
+            }
+            RecMsg::NextMarker => {
+                if let Some((_, _, p)) = &self.player {
+                    if let Some(to) = p.next_marker(p.position()) {
+                        self.drag = None;
+                        p.seek(to);
+                    }
+                }
+            }
             RecMsg::Tick => {
                 if let Some(e) = self.player.as_ref().and_then(|(_, _, p)| p.error()) {
                     self.player = None;
@@ -496,6 +567,7 @@ impl Recordings {
             RecMsg::Format(i) => cfg.set("format", if i == 1 { "mp3" } else { "wav" }),
             RecMsg::Preset(i) => cfg.set("mp3_preset", i as i64),
             RecMsg::Join(v) => cfg.set("join", v),
+            RecMsg::Labels(v) => cfg.set("labels", v),
             RecMsg::Export(serial) => return self.start_export(&serial, cfg),
             RecMsg::Progress(done, label) => {
                 if let Some(j) = &mut self.export {
@@ -649,34 +721,51 @@ impl Recordings {
         } else {
             "media-playback-pause-symbolic"
         };
-        let mut marks = String::new();
-        if !p.markers.is_empty() {
-            let n = p.markers.len();
-            marks = format!(
-                "  ·  {n} marker{} at {}",
-                if n == 1 { "" } else { "s" },
-                p.markers
-                    .iter()
-                    .map(|&m| fmt_dur(p.seconds(m)))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            );
-        }
-        let controls = widget::row::with_capacity(4)
+        let seek = widget::slider(0.0..=p.total.max(1) as f64, pos, |v| {
+            Message::Rec(RecMsg::SeekDrag(v))
+        })
+        .on_release(Message::Rec(RecMsg::SeekRelease))
+        .width(Length::Fill);
+        let mut controls = widget::row::with_capacity(6)
             .spacing(space.space_s)
             .align_y(Alignment::Center)
             .push(
                 widget::button::icon(widget::icon::from_name(icon))
                     .tooltip(if p.paused() { "Play" } else { "Pause" })
                     .on_press(Message::Rec(RecMsg::PlayPause)),
-            )
-            .push(
-                widget::slider(0.0..=p.total.max(1) as f64, pos, |v| {
-                    Message::Rec(RecMsg::SeekDrag(v))
-                })
-                .on_release(Message::Rec(RecMsg::SeekRelease))
-                .width(Length::Fill),
-            )
+            );
+        let mut col = widget::column::with_capacity(3).spacing(space.space_xxs);
+        if p.markers.is_empty() {
+            controls = controls.push(seek);
+            col = col.push(widget::text::caption(format!("Playing {name}")));
+        } else {
+            let n = p.markers.len();
+            col = col.push(widget::text::caption(format!(
+                "Playing {name}  ·  {n} marker{}",
+                if n == 1 { "" } else { "s" }
+            )));
+            controls = controls
+                .push(
+                    widget::button::icon(widget::icon::from_name("media-skip-backward-symbolic"))
+                        .tooltip("Previous marker")
+                        .on_press(Message::Rec(RecMsg::PrevMarker)),
+                )
+                .push(
+                    widget::column::with_capacity(2)
+                        .width(Length::Fill)
+                        .push(seek)
+                        .push(marker_ticks(&p.markers, p.total)),
+                )
+                .push(
+                    widget::button::icon(widget::icon::from_name("media-skip-forward-symbolic"))
+                        .tooltip("Next marker")
+                        .on_press_maybe(
+                            p.next_marker(pos as u64)
+                                .map(|_| Message::Rec(RecMsg::NextMarker)),
+                        ),
+                );
+        }
+        controls = controls
             .push(widget::text::body(format!(
                 "{} / {}",
                 fmt_dur(p.seconds(pos as u64)),
@@ -687,13 +776,28 @@ impl Recordings {
                     .tooltip("Stop")
                     .on_press(Message::Rec(RecMsg::Stop)),
             );
-        Some(
-            widget::column::with_capacity(2)
-                .spacing(space.space_xxs)
-                .push(widget::text::caption(format!("Playing {name}{marks}")))
-                .push(controls)
-                .into(),
-        )
+        col = col.push(controls);
+        if !p.markers.is_empty() {
+            // one button per marker: jump there
+            let now = pos as u64;
+            let current = p.markers.iter().rposition(|&m| m <= now);
+            let chips: Vec<Element<'_, Message>> = p
+                .markers
+                .iter()
+                .enumerate()
+                .map(|(i, &m)| {
+                    let label = format!("{}  {}", i + 1, fmt_dur(p.seconds(m)));
+                    let b = if current == Some(i) {
+                        widget::button::suggested(label)
+                    } else {
+                        widget::button::standard(label)
+                    };
+                    b.on_press(Message::Rec(RecMsg::SeekTo(m))).into()
+                })
+                .collect();
+            col = col.push(widget::flex_row(chips).spacing(space.space_xxs));
+        }
+        Some(col.into())
     }
 
     /// Demo mode: show these recordings for this transmitter (the first one ticked).
@@ -727,6 +831,7 @@ impl Recordings {
             return Task::none();
         };
         let join = cfg.bool("join");
+        let labels = cfg.bool("labels");
         let mp3 = cfg.str("format") == "mp3";
         let (encoding, ext) = if mp3 {
             (
@@ -806,7 +911,15 @@ impl Recordings {
                     cancel: Some(&cancel),
                 };
                 match rec::export(&g, &dst, &encoding, start, end, progress) {
-                    Ok(_) => written += 1,
+                    Ok(_) => {
+                        written += 1;
+                        if labels {
+                            if let Err(e) = rec::write_labels(&g, &dst) {
+                                let txt = rec::label_path(&dst);
+                                return RecMsg::Exported(Err(format!("{}: {e}", txt.display())));
+                            }
+                        }
+                    }
                     Err(e) if e.to_string() == rec::CANCELLED => {
                         return RecMsg::Exported(Ok((
                             written,
@@ -1012,6 +1125,17 @@ impl Recordings {
             "Join split files",
             widget::toggler(cfg.bool("join")).on_toggle(|v| Message::Rec(RecMsg::Join(v))),
         ));
+        sec = sec.add(
+            settings::item::builder("Marker label file")
+                .description(
+                    "Markers are kept in the file itself (WAV cue points, MP3 chapters). This also \
+                     writes them to a .txt next to it, for Audacity's File → Import → Labels.",
+                )
+                .control(
+                    widget::toggler(cfg.bool("labels"))
+                        .on_toggle(|v| Message::Rec(RecMsg::Labels(v))),
+                ),
+        );
         let bottom: Element<'a, Message> = match &self.export {
             Some(j) => widget::row::with_capacity(3)
                 .spacing(space.space_s)
@@ -1096,6 +1220,15 @@ impl Recordings {
 mod tests {
     use super::*;
     use micdock_core::testdata::{samples, write_ugg, write_wav};
+
+    #[test]
+    fn marker_ticks_sit_in_proportion() {
+        assert_eq!(tick_gaps(&[], 100), [10_000]);
+        assert_eq!(tick_gaps(&[25, 50], 100), [2500, 2500, 5000]);
+        // at the same place, past the end, or with nothing to play: never negative, always 10 000 in all
+        assert_eq!(tick_gaps(&[50, 50, 200], 100), [5000, 0, 5000, 0]);
+        assert_eq!(tick_gaps(&[0], 0), [0, 10_000]);
+    }
 
     #[test]
     fn names() {

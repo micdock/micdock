@@ -342,7 +342,10 @@ pub fn open_wav(path: &Path) -> Result<Recording> {
             b"data" => {
                 let off = pos + 8;
                 data = Some((off, ln.min(size - off))); // an unfinished file may be short
-                break;
+                if off + ln >= size {
+                    break;
+                }
+                // exports keep their markers in a `cue ` chunk after the audio
             }
             _ => {}
         }
@@ -545,13 +548,65 @@ fn pump(
     Ok(written)
 }
 
-/// A canonical 44-byte PCM WAV header (the same layout Python's `wave` module writes).
-fn wav_header(first: &Recording, data_len: u64) -> Vec<u8> {
+/// Marker positions of recordings played or exported back to back, in sample frames from the start of
+/// the first one (each piece's markers shifted by the length of the pieces before it).
+pub fn joined_markers(infos: &[Recording]) -> Vec<u64> {
+    let mut out = Vec::new();
+    let mut start = 0u64;
+    for r in infos {
+        out.extend(r.markers.iter().map(|&m| start + (m as u64).min(r.frames)));
+        start += r.frames;
+    }
+    out
+}
+
+/// The name a marker gets in exports: "Marker 1", "Marker 2", …
+pub fn marker_name(i: usize) -> String {
+    format!("Marker {}", i + 1)
+}
+
+/// `cue ` chunk plus a `LIST`/`adtl` chunk with a `labl` (name) per marker, as audio editors read them.
+fn cue_chunks(markers: &[u64]) -> Vec<u8> {
+    let mut cue = Vec::new();
+    cue.extend((markers.len() as u32).to_le_bytes());
+    for (i, &m) in markers.iter().enumerate() {
+        let m = m.min(u32::MAX as u64) as u32;
+        cue.extend((i as u32 + 1).to_le_bytes()); // cue point id
+        cue.extend(m.to_le_bytes()); // play order position
+        cue.extend(b"data");
+        cue.extend(0u32.to_le_bytes()); // chunk start
+        cue.extend(0u32.to_le_bytes()); // block start
+        cue.extend(m.to_le_bytes()); // sample offset
+    }
+    let mut adtl = b"adtl".to_vec();
+    for i in 0..markers.len() {
+        let mut text = marker_name(i).into_bytes();
+        text.push(0);
+        adtl.extend(b"labl");
+        adtl.extend((4 + text.len() as u32).to_le_bytes());
+        adtl.extend((i as u32 + 1).to_le_bytes());
+        adtl.extend(&text);
+        if text.len() % 2 == 1 {
+            adtl.push(0); // chunks are word-aligned
+        }
+    }
+    let mut out = b"cue ".to_vec();
+    out.extend((cue.len() as u32).to_le_bytes());
+    out.extend(cue);
+    out.extend(b"LIST");
+    out.extend((adtl.len() as u32).to_le_bytes());
+    out.extend(adtl);
+    out
+}
+
+/// A canonical 44-byte PCM WAV header (the same layout Python's `wave` module writes). `extra` = bytes of
+/// chunks after the data chunk (they count in the RIFF size).
+fn wav_header(first: &Recording, data_len: u64, extra: u64) -> Vec<u8> {
     let ch = first.channels as u32;
     let width = first.width as u32;
     let mut h = Vec::with_capacity(44);
     h.extend_from_slice(b"RIFF");
-    h.extend_from_slice(&((36 + data_len) as u32).to_le_bytes());
+    h.extend_from_slice(&((36 + data_len + extra) as u32).to_le_bytes());
     h.extend_from_slice(b"WAVEfmt ");
     h.extend_from_slice(&16u32.to_le_bytes());
     h.extend_from_slice(&1u16.to_le_bytes()); // PCM
@@ -568,7 +623,7 @@ fn wav_header(first: &Recording, data_len: u64) -> Vec<u8> {
 fn write_wav(tmp: &Path, infos: &[Recording], progress: &mut Progress) -> Result<u64> {
     let first = &infos[0];
     let mut out = BufWriter::with_capacity(1 << 20, File::create(tmp)?);
-    out.write_all(&wav_header(first, 0))?;
+    out.write_all(&wav_header(first, 0, 0))?;
     let n = pump(infos, progress, &mut |pk| {
         if first.byteswap {
             out.write_all(&swap(pk, first.width))?;
@@ -577,16 +632,113 @@ fn write_wav(tmp: &Path, infos: &[Recording], progress: &mut Progress) -> Result
         }
         Ok(())
     })?;
+    // markers go after the audio, so the data chunk can be written in one pass
+    let markers = joined_markers(infos);
+    let mut extra = Vec::new();
+    if !markers.is_empty() {
+        if n % 2 == 1 {
+            extra.push(0); // pad byte of an odd-sized data chunk
+        }
+        extra.extend(cue_chunks(&markers));
+        out.write_all(&extra)?;
+    }
     let mut f = out.into_inner().map_err(|e| Error::Io(e.into_error()))?;
     f.seek(SeekFrom::Start(0))?;
-    f.write_all(&wav_header(first, n))?;
+    f.write_all(&wav_header(first, n, extra.len() as u64))?;
     Ok(n)
+}
+
+/// ffmpeg metadata with one chapter per marker (plus "Start" before the first marker), or None
+/// without markers.
+fn ffmetadata_chapters(infos: &[Recording]) -> Option<String> {
+    let markers = joined_markers(infos);
+    if markers.is_empty() {
+        return None;
+    }
+    let rate = infos[0].rate;
+    let total: u64 = infos.iter().map(|r| r.frames).sum();
+    let mut starts: Vec<(u64, String)> = Vec::new();
+    if markers[0] > 0 {
+        starts.push((0, "Start".into()));
+    }
+    for (i, &m) in markers.iter().enumerate() {
+        starts.push((m, marker_name(i)));
+    }
+    let mut meta = String::from(";FFMETADATA1\n");
+    for (k, (start, title)) in starts.iter().enumerate() {
+        let end = starts.get(k + 1).map_or(total, |n| n.0);
+        if end <= *start {
+            continue; // two markers at the same place, or one at the very end
+        }
+        meta.push_str(&format!(
+            "[CHAPTER]\nTIMEBASE=1/{rate}\nSTART={start}\nEND={end}\ntitle={title}\n"
+        ));
+    }
+    Some(meta)
+}
+
+/// Audacity label track (one point label per marker): "seconds<TAB>seconds<TAB>name" per line.
+pub fn label_text(infos: &[Recording]) -> String {
+    let rate = infos.first().map_or(48000, |r| r.rate) as f64;
+    joined_markers(infos)
+        .iter()
+        .enumerate()
+        .map(|(i, &m)| {
+            let t = m as f64 / rate;
+            format!("{t:.6}\t{t:.6}\t{}\n", marker_name(i))
+        })
+        .collect()
+}
+
+/// Where [`write_labels`] puts the label file of an export: next to it, with `.txt` instead of its
+/// extension.
+pub fn label_path(dst: &Path) -> PathBuf {
+    dst.with_extension("txt")
+}
+
+/// Write the Audacity label file next to an export of these recordings. Does nothing (and returns None)
+/// when they have no markers.
+pub fn write_labels(infos: &[Recording], dst: &Path) -> Result<Option<PathBuf>> {
+    let text = label_text(infos);
+    if text.is_empty() {
+        return Ok(None);
+    }
+    let path = label_path(dst);
+    std::fs::write(&path, text)?;
+    Ok(Some(path))
 }
 
 fn write_mp3(
     tmp: &Path,
     infos: &[Recording],
     args: &[String],
+    progress: &mut Progress,
+) -> Result<u64> {
+    let mut meta_path = tmp.as_os_str().to_owned();
+    meta_path.push(".chapters");
+    let meta_path = PathBuf::from(meta_path);
+    let chapters = ffmetadata_chapters(infos);
+    if let Some(meta) = &chapters {
+        std::fs::write(&meta_path, meta)?;
+    }
+    let result = run_ffmpeg(
+        tmp,
+        infos,
+        args,
+        chapters.is_some().then_some(&meta_path),
+        progress,
+    );
+    if chapters.is_some() {
+        let _ = std::fs::remove_file(&meta_path);
+    }
+    result
+}
+
+fn run_ffmpeg(
+    tmp: &Path,
+    infos: &[Recording],
+    args: &[String],
+    chapters: Option<&PathBuf>,
     progress: &mut Progress,
 ) -> Result<u64> {
     let first = &infos[0];
@@ -596,24 +748,31 @@ fn write_mp3(
         first.width * 8,
         if first.byteswap { "be" } else { "le" }
     );
-    let mut child = Command::new("ffmpeg")
-        .args([
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-nostdin",
-            "-y",
-            "-f",
-            &pcm_fmt,
-        ])
-        .args([
-            "-ar",
-            &first.rate.to_string(),
-            "-ac",
-            &first.channels.to_string(),
-            "-i",
-            "pipe:0",
-        ])
+    let mut cmd = Command::new("ffmpeg");
+    cmd.args([
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-nostdin",
+        "-y",
+        "-f",
+        &pcm_fmt,
+    ])
+    .args([
+        "-ar",
+        &first.rate.to_string(),
+        "-ac",
+        &first.channels.to_string(),
+        "-i",
+        "pipe:0",
+    ]);
+    if let Some(meta) = chapters {
+        // ID3v2 CHAP frames, one per marker
+        cmd.args(["-f", "ffmetadata", "-i"])
+            .arg(meta)
+            .args(["-map", "0:a", "-map_chapters", "1"]);
+    }
+    let mut child = cmd
         .args(["-c:a", "libmp3lame"])
         .args(args)
         .args(["-f", "mp3"])
@@ -840,6 +999,156 @@ mod file_tests {
                 ..
             }
         ));
+        std::fs::remove_dir_all(d).unwrap();
+    }
+
+    #[test]
+    fn markers_of_joined_pieces_are_shifted() {
+        let d = tmp("markers");
+        let (a, b) = (d.join("REC00001.WAV"), d.join("REC00002.WAV"));
+        write_wav(&a, &samples(3000, 1), &[100, 2999], 100.0);
+        write_wav(&b, &samples(1501, 2), &[10, 1500], 200.0);
+        let infos = [&a, &b].map(|p| open_recording(p).unwrap());
+        assert_eq!(joined_markers(&infos), vec![100, 2999, 3010, 4500]);
+        assert_eq!(joined_markers(&infos[1..]), vec![10, 1500]);
+        assert_eq!(
+            label_text(&infos[..1]),
+            "0.002083\t0.002083\tMarker 1\n0.062479\t0.062479\tMarker 2\n"
+        );
+        let meta = ffmetadata_chapters(&infos).unwrap();
+        assert_eq!(
+            meta.matches("[CHAPTER]").count(),
+            5,
+            "Start + 4 markers: {meta}"
+        );
+        assert!(meta.contains("START=0\nEND=100\ntitle=Start\n"), "{meta}");
+        assert!(
+            meta.contains("START=4500\nEND=4501\ntitle=Marker 4\n"),
+            "{meta}"
+        );
+        assert!(ffmetadata_chapters(&infos[..0]).is_none());
+        std::fs::remove_dir_all(d).unwrap();
+    }
+
+    #[test]
+    fn wav_export_keeps_the_markers() {
+        let d = tmp("export-markers");
+        let (a, b) = (d.join("REC00001.WAV"), d.join("REC00002.WAV"));
+        let (sa, sb) = (samples(3000, 1), samples(1501, 2)); // odd data size: needs a pad byte
+        write_wav(&a, &sa, &[100, 2999], 100.0);
+        write_wav(&b, &sb, &[10], 200.0);
+        let infos = [&a, &b].map(|p| open_recording(p).unwrap());
+        let out = d.join("joined.wav");
+        export(
+            &infos,
+            &out,
+            &Encoding::Wav,
+            None,
+            None,
+            Progress::default(),
+        )
+        .unwrap();
+        let bytes = std::fs::read(&out).unwrap();
+        let riff = u32::from_le_bytes(bytes[4..8].try_into().unwrap()) as usize;
+        assert_eq!(
+            riff,
+            bytes.len() - 8,
+            "RIFF size includes the marker chunks"
+        );
+        let data = u32::from_le_bytes(bytes[40..44].try_into().unwrap()) as usize;
+        assert_eq!(data, 4501 * 3);
+        assert_eq!(
+            &bytes[44 + data + 1..44 + data + 5],
+            b"cue ",
+            "after the pad byte"
+        );
+        let want: Vec<u8> = sa
+            .iter()
+            .chain(&sb)
+            .flat_map(|v| v.to_le_bytes()[..3].to_vec())
+            .collect();
+        assert_eq!(&bytes[44..44 + data], &want[..]);
+        for name in ["Marker 1", "Marker 2", "Marker 3"] {
+            assert!(
+                bytes.windows(name.len()).any(|w| w == name.as_bytes()),
+                "{name} label"
+            );
+        }
+        // MicDock (and audio editors) read them back
+        let r = open_recording(&out).unwrap();
+        assert_eq!(r.markers, vec![100, 2999, 3010]);
+        assert_eq!(r.frames, 4501);
+        // without markers: the plain 44-byte layout as before
+        let none = d.join("none.wav");
+        let c = d.join("REC00003.WAV");
+        write_wav(&c, &samples(10, 3), &[], 300.0);
+        export(
+            &[open_recording(&c).unwrap()],
+            &none,
+            &Encoding::Wav,
+            None,
+            None,
+            Progress::default(),
+        )
+        .unwrap();
+        assert_eq!(std::fs::metadata(&none).unwrap().len(), 44 + 30);
+        assert_eq!(
+            write_labels(&[open_recording(&c).unwrap()], &none).unwrap(),
+            None
+        );
+        assert_eq!(
+            write_labels(&infos, &out).unwrap(),
+            Some(d.join("joined.txt"))
+        );
+        assert_eq!(
+            std::fs::read_to_string(d.join("joined.txt"))
+                .unwrap()
+                .lines()
+                .count(),
+            3
+        );
+        std::fs::remove_dir_all(d).unwrap();
+    }
+
+    /// Needs ffmpeg and ffprobe (skipped without them).
+    #[test]
+    fn mp3_export_has_a_chapter_per_marker() {
+        let have = |p: &str| {
+            Command::new(p)
+                .arg("-version")
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .is_ok_and(|s| s.success())
+        };
+        if !have("ffmpeg") || !have("ffprobe") {
+            eprintln!("skipped: no ffmpeg/ffprobe");
+            return;
+        }
+        let d = tmp("export-mp3-chapters");
+        let a = d.join("REC00001.WAV");
+        write_wav(&a, &samples(48000, 1), &[12000, 36000], 100.0);
+        let infos = [open_recording(&a).unwrap()];
+        let out = d.join("talk.mp3");
+        export(
+            &infos,
+            &out,
+            &Encoding::Mp3(mp3_args(5, None)),
+            None,
+            None,
+            Progress::default(),
+        )
+        .unwrap();
+        let probe = Command::new("ffprobe")
+            .args(["-v", "error", "-show_chapters", "-of", "csv=p=0"])
+            .arg(&out)
+            .output()
+            .unwrap();
+        let text = String::from_utf8_lossy(&probe.stdout);
+        let titles: Vec<&str> = text.lines().filter_map(|l| l.rsplit(',').next()).collect();
+        assert_eq!(titles, ["Start", "Marker 1", "Marker 2"], "{text}");
+        assert!(text.contains("0.250000"), "{text}");
+        assert!(!d.join("talk.mp3.part.chapters").exists());
         std::fs::remove_dir_all(d).unwrap();
     }
 
