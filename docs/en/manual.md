@@ -136,7 +136,11 @@ the recordings you want to keep first. The transmitter may restart for a moment 
 Single recordings can't be deleted: the transmitter protects its drive against changes from the computer and
 only offers to delete everything at once (RØDE's own app works the same way).
 
-File types: firmware 2.50 and later records `.WAV` files; older firmware wrote `.UGG` files. MicDock reads both.
+File types: firmware 2.50 and later records `.WAV` files; older firmware wrote `.UGG` files. Recordings made
+with **Recording format: Compressed** (see [LEDs and recording format](#leds-and-recording-format-transmitters))
+are also `.UGG` files, shown as *UGG, compressed* in the list. MicDock reads all of them: compressed recordings are
+decoded while playing or exporting (that takes a few seconds for a long recording) and exported as normal 24-bit
+WAV or MP3 files.
 The `.EGG` files on the drive hold waveform previews for RØDE's app and can be ignored.
 
 ## The receiver

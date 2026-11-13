@@ -1024,7 +1024,11 @@ impl Recordings {
                         s.len(),
                         if s.len() == 1 { "" } else { "s" },
                         fmt_size(size),
-                        s[0].kind()
+                        if s[0].compressed() {
+                            "UGG, compressed"
+                        } else {
+                            s[0].kind()
+                        }
                     );
                     if marks > 0 {
                         details.push_str(&format!(

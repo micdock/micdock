@@ -402,3 +402,30 @@ itself over USB, restored afterwards). Several values are the reverse of Open Ro
   MicDock writes UTC. MicDock recognises a clock off by exactly the local offset.
 - The LED value 0xFF written to the TX's own param 0x0c switched its LEDs off (2026-11-12): only use DF/FE.
 
+## Compressed recordings: the RODEC codec (2026-11-13)
+With *Recording format: Compressed* the TX writes `RECnnnnn.UGG` files whose Ogg header packet is `"RODEC   "`
+(27 bytes: u8 1 at 8, rate u32 at 16 = 48000, channels u16 at 20 = 1, 0x1e at 22) instead of OggPCM's `"PCM     "`;
+packet 1 is the usual `vorbis` comment. Every page holds 16 audio packets plus an empty one; the granule counts samples
+(7680 per page) and keeps counting across file splits, as with PCM UGGs.
+
+Each audio packet is 10 ms: 245 bytes = five 49-byte frames, each a header byte and 96 four-bit codes (8-byte groups,
+little-endian, low nibble first). The codec is CEVA's ("CEVA dsp will wrap around!!!" in RØDE Central's error strings), a
+backward-adaptive ADPCM in Q31 fixed point:
+
+- sample: 40-tap prediction from earlier output (coefficients glide towards the newest set), plus the dequantised code
+  (8 levels per sign, ((2k+1)/15)², times an adaptive step size);
+- every 288 samples the decoder designs the next predictor from the block it just decoded (power spectrum from six
+  windowed 48-sample subframes and a 128-point fixed-point FFT, smoothed over time and frequency, minimum phase through
+  the real cepstrum, coefficients = the impulse response / first tap); the encoder does the same, so nothing is sent;
+- header byte: the encoder's step-size index (0..127, applied every 288 samples), or with bit 7 set the position in the
+  288-sample block at the start of a file (the decoder skips to the next block boundary, so a file loses up to 287
+  samples at the start, as in RØDE Central).
+
+How it was found: `rode_bridge.dll` (RØDE Central for Windows) has the decoder at `0x180096e00` (init), `0x180097040`
+(decode one packet) and the functions it calls; the Ogg reader recognises `RODEC` at `0x1800b8971`. Only those
+functions were run, in the unicorn CPU emulator with every import stubbed, as a reference: no RØDE code is part of
+MicDock. The decoder was rewritten from the disassembly (`src/crates/micdock-core/src/rodec.rs`) and matches the
+reference sample for sample on real recordings and on a synthetic stream (the test in `rodec.rs` checks a hash of
+the reference output). The sine, log, inverse-square-root and reciprocal tables are generated from formulas
+(checked against the DLL's by checksum); the codec parameters (step sizes, levels, window) are constants of the format.
+

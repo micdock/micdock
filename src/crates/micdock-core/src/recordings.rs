@@ -9,6 +9,8 @@
 //!             + u8 bits + u8 channels + u16 max_frames + u32 extra_headers   (all little-endian)
 //!   packet 1: comment (`"vorbis"` + `"RODE Wireless GO II v..."`)
 //!   rest:     raw interleaved PCM. Format 4 = signed 24-bit little-endian.
+//! In the transmitter's compressed format the header packet is `"RODEC   "` instead (rate at 16, channels
+//! at 20) and the packets are ADPCM, decoded by [`crate::rodec`]; such files are read as 24-bit PCM.
 //! Pages may be followed by a few padding bytes, so we resync on `OggS`.
 //! The granule position keeps counting across the TX's ~31-minute file splits, so a file whose first
 //! granule equals the previous file's last granule continues the same recording session.
@@ -178,7 +180,7 @@ pub fn swap(data: &[u8], width: usize) -> Vec<u8> {
 fn parse_head(pk: &[u8]) -> Result<(u32, u16, u16, usize, bool)> {
     if !pk.starts_with(b"PCM     ") || pk.len() < 22 {
         return Err(Error::other(format!(
-            "not an OggPCM stream (got {:?})",
+            "not an OggPCM or RODEC stream (got {:?})",
             String::from_utf8_lossy(&pk[..pk.len().min(8)])
         )));
     }
@@ -197,8 +199,13 @@ fn parse_head(pk: &[u8]) -> Result<(u32, u16, u16, usize, bool)> {
 /// File-type specific details of a recording.
 #[derive(Debug, Clone)]
 pub enum Container {
-    /// Older firmware: Ogg/OggPCM. The granule positions link the ~31-minute pieces.
-    Ugg { first_gp: i64, last_gp: i64 },
+    /// Older firmware, or the compressed format: Ogg with PCM or RODEC (ADPCM) packets. The granule
+    /// positions link the ~31-minute pieces.
+    Ugg {
+        first_gp: i64,
+        last_gp: i64,
+        compressed: bool,
+    },
     /// Firmware 2.50+: RIFF/WAVE with the audio in one data chunk.
     Wav { data_offset: u64, data_len: u64 },
 }
@@ -231,6 +238,17 @@ impl Recording {
             Container::Ugg { .. } => "UGG",
             Container::Wav { .. } => "WAV",
         }
+    }
+
+    /// Recorded in the transmitter's compressed format (decoded while reading).
+    pub fn compressed(&self) -> bool {
+        matches!(
+            self.container,
+            Container::Ugg {
+                compressed: true,
+                ..
+            }
+        )
     }
 
     pub fn seconds(&self) -> f64 {
@@ -267,8 +285,22 @@ pub fn open_ugg(path: &Path) -> Result<Recording> {
         .next()
         .transpose()?
         .ok_or_else(|| Error::other("not an OggPCM stream (no packets)"))?;
-    let (rate, bits, channels, width, byteswap) = parse_head(&first)?;
+    let compressed = crate::rodec::parse_header(&first);
+    let (rate, bits, channels, width, byteswap) = match compressed {
+        Some((rate, 1)) => (rate, 24, 1, 3, false),
+        Some((_, ch)) => {
+            return Err(Error::other(format!(
+                "compressed recording with {ch} channels (only mono is supported)"
+            )))
+        }
+        None => parse_head(&first)?,
+    };
     let frame_bytes = width * channels as usize;
+    // samples in a page of `bytes` audio bytes
+    let samples = |bytes: i64| match compressed {
+        Some(_) => crate::rodec::samples_in(bytes as usize) as i64,
+        None => bytes.div_euclid(frame_bytes.max(1) as i64),
+    };
     let i64_at = |b: &[u8], at: usize| i64::from_le_bytes(b[at..at + 8].try_into().unwrap());
     let last_gp = match tail.windows(4).rposition(|w| w == b"OggS") {
         Some(q) if q + 14 <= tail.len() => i64_at(&tail, q + 6),
@@ -283,7 +315,7 @@ pub fn open_ugg(path: &Path) -> Result<Recording> {
                 .iter()
                 .map(|&s| s as i64)
                 .sum();
-            gp - sum.div_euclid(frame_bytes.max(1) as i64)
+            gp - samples(sum)
         }
         _ => last_gp,
     };
@@ -300,7 +332,11 @@ pub fn open_ugg(path: &Path) -> Result<Recording> {
         frame_bytes,
         frames: (last_gp - first_gp).max(0) as u64,
         markers: Vec::new(),
-        container: Container::Ugg { first_gp, last_gp },
+        container: Container::Ugg {
+            first_gp,
+            last_gp,
+            compressed: compressed.is_some(),
+        },
     })
 }
 
@@ -526,18 +562,36 @@ fn pump(
                     tick(n, progress)?;
                 }
             }
-            Container::Ugg { .. } => {
+            Container::Ugg { compressed, .. } => {
                 let mut packets = OggPackets::new(File::open(&info.path)?);
                 packets.next().transpose()?; // header
                 packets.next().transpose()?; // comment
+                let mut decoder = compressed.then(crate::rodec::Decoder::new);
+                let (mut samples, mut pcm) = (Vec::new(), Vec::new());
                 for pk in packets {
                     let pk = pk?;
                     if pk.is_empty() {
                         continue;
                     }
-                    sink(&pk)?;
-                    written += pk.len() as u64;
-                    tick(pk.len(), progress)?;
+                    let data = match decoder.as_mut() {
+                        Some(d) => {
+                            samples.clear();
+                            d.decode(&pk, &mut samples);
+                            pcm.clear();
+                            pcm.extend(samples.iter().flat_map(|v| {
+                                let b = v.to_le_bytes();
+                                [b[0], b[1], b[2]]
+                            }));
+                            &pcm[..]
+                        }
+                        None => &pk[..],
+                    };
+                    if data.is_empty() {
+                        continue;
+                    }
+                    sink(data)?;
+                    written += data.len() as u64;
+                    tick(data.len(), progress)?;
                 }
             }
         }
@@ -957,7 +1011,7 @@ mod tests {
 #[cfg(test)]
 mod file_tests {
     use super::*;
-    use crate::testdata::{samples, write_ugg, write_wav};
+    use crate::testdata::{rodec_packets, samples, write_rodec_ugg, write_ugg, write_wav};
 
     fn tmp(name: &str) -> PathBuf {
         let d = std::env::temp_dir().join(format!("micdock-rec-{}-{name}", std::process::id()));
@@ -1153,6 +1207,63 @@ mod file_tests {
     }
 
     #[test]
+    fn reads_and_exports_a_compressed_recording() {
+        let d = tmp("rodec");
+        let mut pk = rodec_packets(40);
+        pk[32][0] = 0x80 | 6; // each file starts with its place in the block (here: skip 192 samples)
+        let (a, b) = (d.join("REC00001.UGG"), d.join("REC00002.UGG"));
+        write_rodec_ugg(&a, 0, &pk[..32], 100.0);
+        write_rodec_ugg(&b, 32 * 480, &pk[32..], 200.0);
+        let infos = [&a, &b].map(|p| open_recording(p).unwrap());
+        assert!(infos[0].compressed() && infos[1].compressed());
+        assert_eq!(infos[0].kind(), "UGG");
+        assert_eq!(
+            (infos[0].rate, infos[0].bits, infos[0].channels),
+            (48000, 24, 1)
+        );
+        assert_eq!(infos[0].frames, 32 * 480);
+        assert!(
+            continues(&infos[0], &infos[1]),
+            "the granule links the pieces"
+        );
+        // what the decoder makes of the same packets, file by file
+        let want = |pk: &[Vec<u8>]| {
+            let mut dec = crate::rodec::Decoder::new();
+            let mut out = Vec::new();
+            pk.iter().for_each(|p| dec.decode(p, &mut out));
+            out
+        };
+        let out = d.join("one.wav");
+        export(
+            &infos[..1],
+            &out,
+            &Encoding::Wav,
+            None,
+            None,
+            Progress::default(),
+        )
+        .unwrap();
+        assert_eq!(wav_samples(&out), want(&pk[..32]));
+        // each piece is decoded on its own, from its own start
+        let joined = d.join("joined.wav");
+        export(
+            &infos,
+            &joined,
+            &Encoding::Wav,
+            None,
+            None,
+            Progress::default(),
+        )
+        .unwrap();
+        let mut all = want(&pk[..32]);
+        let second = want(&pk[32..]);
+        assert_eq!(second.len(), 8 * 480 - 192);
+        all.extend(second);
+        assert_eq!(wav_samples(&joined), all);
+        std::fs::remove_dir_all(d).unwrap();
+    }
+
+    #[test]
     fn reads_a_ugg_recording_with_its_granule() {
         let d = tmp("ugg");
         let p = d.join("REC00042.UGG");
@@ -1162,7 +1273,9 @@ mod file_tests {
         assert_eq!((r.rate, r.bits, r.channels, r.width), (48000, 24, 1, 3));
         assert_eq!(r.frames, 1000);
         match r.container {
-            Container::Ugg { first_gp, last_gp } => assert_eq!((first_gp, last_gp), (1000, 2000)),
+            Container::Ugg {
+                first_gp, last_gp, ..
+            } => assert_eq!((first_gp, last_gp), (1000, 2000)),
             _ => panic!("not UGG"),
         }
         std::fs::remove_dir_all(d).unwrap();

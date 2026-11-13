@@ -10,6 +10,9 @@
 - **Marker label file:** optionally (on by default) a `.txt` next to each export with markers, which Audacity
   imports as a label track; `ugg2wav --labels` does the same.
 - `ugg2wav` says how many markers each output file has.
+- **Compressed recordings:** recordings made in the transmitter's compressed format (`.UGG` files with RØDE's own
+  ADPCM codec, which MicDock reported as "not an OggPCM stream") now play and export like the others. MicDock has
+  its own decoder for the format, bit-exact with RØDE's.
 
 ## 0.11.0
 

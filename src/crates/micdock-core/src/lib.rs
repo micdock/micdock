@@ -20,6 +20,7 @@ pub mod guide;
 pub mod hid;
 pub mod paths;
 pub mod recordings;
+pub mod rodec;
 pub mod testdata;
 
 use std::time::Duration;
