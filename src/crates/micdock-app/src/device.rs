@@ -97,6 +97,20 @@ pub enum DevMsg {
     Scanned(String, Result<Scan, String>),
 }
 
+/// How a unit's clock compares with the computer's. MicDock sets clocks to UTC (unix time); RØDE's app
+/// writes the local wall time instead (seen in its USB traffic), so a unit it set is off by exactly the local
+/// UTC offset — that is said as such rather than as "an hour off".
+fn clock_state(drift: f64, local_offset: f64) -> String {
+    if drift.abs() < 5.0 {
+        "in sync".to_string()
+    } else if local_offset != 0.0 && (drift - local_offset).abs() < 120.0 {
+        "set to local time, as RØDE's app does; MicDock uses UTC — Set clock to now to change"
+            .to_string()
+    } else {
+        format!("{drift:+.0} s off")
+    }
+}
+
 /// Cut a name to what fits in the device's name field (at a character boundary).
 fn fit_name(name: &str) -> String {
     let mut end = name.len().min(NAME_MAX);
@@ -502,11 +516,10 @@ impl DevicePage {
             }
             (Some(c), Some(at)) => {
                 let drift = c as f64 - at;
-                let state = if drift.abs() < 5.0 {
-                    "in sync".to_string()
-                } else {
-                    format!("{drift:+.0} s off")
-                };
+                let state = clock_state(
+                    drift,
+                    chrono::Local::now().offset().local_minus_utc() as f64,
+                );
                 format!("{}  ({state})", local(c as f64, "%-d %B %Y, %H:%M:%S"))
             }
         };
@@ -832,6 +845,18 @@ fn install(serial: &str, unit: &str, dir: PathBuf, send: &dyn Fn(DevMsg)) -> Dev
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn clock_states() {
+        assert_eq!(clock_state(2.0, 3600.0), "in sync");
+        assert!(clock_state(3600.0 + 30.0, 3600.0).starts_with("set to local time"));
+        assert_eq!(clock_state(-40.0, 3600.0), "-40 s off");
+        assert_eq!(
+            clock_state(3600.0, 0.0),
+            "+3600 s off",
+            "in UTC there is no local-time mix-up"
+        );
+    }
 
     #[test]
     fn names_fit_the_device_field() {

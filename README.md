@@ -6,9 +6,11 @@ MicDock does on Linux what RØDE's own apps do for the Wireless GO II:
 
 - copy the transmitters' on-board recordings (`.WAV` and older `.UGG`) with correct dates, play them, and
   export them to WAV or MP3, joining the ~31-minute pieces of a long recording;
-- set the on-board record mode (Always / Manual / Backup / Off), the Ø button (Mute / Marker / Record / None)
-  and the transmitters' low-sensitivity pad;
-- set the receiver's output (merged / split), gain mode and level (coarse, fine, camera preset) and power saver;
+- set the on-board record mode (Always / Manual / Backup / Off), the Ø button (Mute / Marker / Record / None),
+  the recording format, the LED brightness and the low-sensitivity pad — over USB or through the receiver, so a
+  transmitter doesn't even have to be connected;
+- set the receiver's output (merged / split), gain mode and level (coarse, fine, camera preset), power saver,
+  safety channel and what its Ø button does;
 - show which transmitters are switched on (through the receiver), with their battery level, and whether the
   receiver is on;
 - show the receiver's USB audio live (level meters, spectrum) and record it to WAV — shared with other programs;
@@ -73,6 +75,9 @@ rodego2 --dev /dev/hidrawN pad [on|off]       # TX low-sensitivity pad
 rodego2 --dev /dev/hidrawN mode [MODE]        # RX output: merged, split
 rodego2 --dev /dev/hidrawN gain [DB] [--mode coarse|fine|preset]   # RX output gain
 rodego2 --dev /dev/hidrawN powersaver [on|off]                     # RX backlight power saver
+rodego2 --dev /dev/hidrawN safety [on|off]                         # RX safety channel (merged mode)
+rodego2 --dev /dev/hidrawN rxbutton [powersaver|marker]            # RX Ø button, single click
+rodego2 --dev /dev/hidrawN radio 1 [--led dim] [--pad on] [--rec backup] [--format compressed]  # a TX via the RX
 rodego2 --dev /dev/hidrawN scan               # read-only dump of all parameters
 rodego2 --dev /dev/hidrawN erase              # TX: delete ALL recordings (asks first; irreversible)
 ugg2wav [--mp3] [--join] -o ~/go2-recordings /media/$USER/<drive>/REC*

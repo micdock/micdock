@@ -376,3 +376,29 @@ presses work while MicDock is open. The receiver's buttons work while it is read
 The receiver's own on/off state still can't be read: with no TX linked at all, MicDock says "not linked"
 instead of "off".
 
+## Transmitter settings through the receiver (verified 2026-11-13)
+
+Found in the HID capture of RØDE Central published by [Open Rode](https://github.com/areoseek/open-rode)
+(MIT), then tested on our units one by one (each change read back from the receiver's TX record and from the TX
+itself over USB, restored afterwards). Several values are the reverse of Open Rode's reading.
+
+- Report 9 `[0x0d, reg, value]` writes a register of the TX linked as **TX1**, `[0x0e, reg, value]` of **TX2**
+  (0x0e is not in RØDE's capture — it had one TX — but reached TX2 only). It works with or without the TX on USB.
+- **`09 1a 00` (refresh)** is needed afterwards: without it a radio write is ACKed but has no effect. RØDE Central
+  sends it after every change and periodically. MicDock now also sends it after receiver settings.
+- Registers: `08` pad (**1 = normal, 0 = pad**), `1a` LEDs (`DF` bright, `FE` dim — applies at once), and the set
+  RØDE always writes together, closed by `1e = 1` ("apply"): `1b` Always, `04` recording on (Always/Backup),
+  `21` Manual (the button records), `1d` button = marker, `17` button active (**1 = Mute** unless marker/record;
+  0 = none), `18` **1 = uncompressed** (only used in Backup).
+- The TX clock register (`06`) took no effect on our units (with or without `1e`); clocks are set over USB.
+- TX status record (RX `0x0b`/`0x0c`): 0–3 serial, 4–7 = TX param 0x02, 8–9 firmware (`50 02` = 2.5.0),
+  14 button active, 15 recording on, 16 uncompressed, 17 Always, 18 LEDs, 20 marker, 21 pad (1 = normal),
+  22 battery, 26 Manual. TX own params: 0x04 ↔ 17, 0x0e ↔ 08 (verified), 0x0f ↔ 21, 0x0a ↔ 1d, 0x0c ↔ 1a.
+- Receiver: `0x0a` single click of its power button: **0 = toggle power saver, 1 = marker** (verified on the
+  screen). `0x07` safety channel: taken and read back; the USB audio stays identical on both channels, so its
+  −20 dB copy is on the 3.5 mm output. `0x14`: Open Rode says RØDE writes it as the inverse of 0x06; on our RX it
+  reads 0 in Split and merged/split works without it, so MicDock leaves it alone.
+- Clocks: RØDE Central writes the **local** wall time as a unix timestamp (capture: 08:59 local at −4 h);
+  MicDock writes UTC. MicDock recognises a clock off by exactly the local offset.
+- The LED value 0xFF written to the TX's own param 0x0c switched its LEDs off (2026-11-12): only use DF/FE.
+

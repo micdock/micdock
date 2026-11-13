@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.11.0
+
+- **Transmitter settings through the receiver:** record mode, Ø button, recording format (compressed or
+  uncompressed in Backup mode), low-sensitivity pad and LED brightness (bright/dim) for each linked transmitter,
+  without connecting it to the computer — on the receiver's Audio page, and from `rodego2 radio`.
+- **LED brightness and recording format** are also on the transmitter's own page.
+- **Receiver:** the Ø button's single click (power saver or marker) and the safety channel (Merged mode).
+- Linked transmitters show their firmware, record mode, button, format and LED setting.
+- A clock set by RØDE's app (local time) is recognised as such instead of showing as an hour off.
+- Settings changes on the receiver are followed by its refresh command, as RØDE Central does.
+- Protocol details found with the help of [Open Rode](https://github.com/areoseek/open-rode)'s capture of
+  RØDE Central's traffic, each verified on hardware (some values turned out reversed).
+
 ## 0.10.0
 
 - **Live audio from the receiver:** a new *Live* tab shows the receiver's USB audio with a level meter per

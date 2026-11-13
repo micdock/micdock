@@ -54,6 +54,8 @@ fn unit(serial: &str, pid: u16, role: Role, node: &str, name: &str, battery: u8)
         pad: None,
         power_saver: None,
         powered: None,
+        safety: None,
+        rx_button: None,
         gain: None,
         id: None,
         links: Vec::new(),
@@ -66,6 +68,8 @@ pub fn units() -> Vec<DeviceStatus> {
     rx.channel = Some(ChannelMode::Split);
     rx.power_saver = Some(true);
     rx.powered = Some(true);
+    rx.safety = Some(false);
+    rx.rx_button = Some(micdock_core::hid::RxButton::PowerSaver);
     rx.gain = Some(Gain {
         mode: FINE_GAIN,
         step: 7,
@@ -78,6 +82,11 @@ pub fn units() -> Vec<DeviceStatus> {
             name: "Presenter".into(),
             battery: Some(86),
             pad: Some(false),
+            firmware: "2.5.0".into(),
+            rec: Some(RecMode::Always),
+            button: Some(ButtonMode::Marker),
+            uncompressed: Some(true),
+            led_dim: Some(false),
         },
         TxLink {
             slot: 2,
@@ -86,6 +95,11 @@ pub fn units() -> Vec<DeviceStatus> {
             name: "Guest".into(),
             battery: Some(64),
             pad: Some(true),
+            firmware: "2.5.0".into(),
+            rec: Some(RecMode::Backup),
+            button: Some(ButtonMode::Mute),
+            uncompressed: Some(false),
+            led_dim: Some(true),
         },
     ];
     let mut tx1 = unit(TX1, 0x0029, Role::Tx, "/dev/hidraw9", "Presenter", 86);

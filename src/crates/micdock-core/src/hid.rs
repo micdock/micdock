@@ -560,6 +560,7 @@ pub fn channel_mode(d: &mut Dev) -> Result<ChannelMode> {
 
 pub fn set_channel_mode(d: &mut Dev, mode: ChannelMode) -> Result<ChannelMode> {
     set_param(d, 0x06, &[(mode == ChannelMode::Merged) as u8])?;
+    refresh(d)?;
     channel_mode(d)
 }
 
@@ -574,6 +575,7 @@ pub fn power_saver(d: &mut Dev) -> Result<bool> {
 pub fn set_power_saver(d: &mut Dev, on: bool) -> Result<bool> {
     for _ in 0..2 {
         set_param(d, 0x04, &[(!on) as u8])?;
+        refresh(d)?;
         std::thread::sleep(std::time::Duration::from_millis(300));
         if power_saver(d)? == on {
             break;
@@ -645,6 +647,7 @@ pub fn set_gain(d: &mut Dev, g: Gain) -> Result<Gain> {
         _ => return Err(Error::other("gain value out of range")),
     }
     set_param(d, 0x05, &[g.mode, g.step])?;
+    refresh(d)?;
     gain(d)
 }
 
@@ -657,6 +660,142 @@ pub fn pad(d: &mut Dev) -> Result<bool> {
 pub fn set_pad(d: &mut Dev, on: bool) -> Result<bool> {
     set_param(d, 0x0e, &[(!on) as u8])?;
     pad(d)
+}
+
+/// RX safety channel (param 0x07, 0/1): in Merged mode a second channel 20 dB quieter, for the camera's
+/// 3.5 mm input. Verified 2026-11-13 that the RX takes and reports it; on the USB audio both channels stay
+/// identical, so its effect is on the 3.5 mm output only.
+pub fn safety_channel(d: &mut Dev) -> Result<bool> {
+    Ok(first_byte(d, 0x07)? != 0)
+}
+
+pub fn set_safety_channel(d: &mut Dev, on: bool) -> Result<bool> {
+    set_param(d, 0x07, &[on as u8])?;
+    refresh(d)?;
+    safety_channel(d)
+}
+
+/// What a single click on the receiver's power button does (param 0x0a, verified 2026-11-13).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RxButton {
+    /// Switch the power saver (backlight) on or off — the default.
+    PowerSaver,
+    /// Drop a marker into the transmitters' recordings.
+    Marker,
+}
+
+impl RxButton {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RxButton::PowerSaver => "powersaver",
+            RxButton::Marker => "marker",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<RxButton> {
+        [RxButton::PowerSaver, RxButton::Marker]
+            .into_iter()
+            .find(|b| b.as_str() == s)
+    }
+}
+
+pub fn rx_button(d: &mut Dev) -> Result<RxButton> {
+    Ok(if first_byte(d, 0x0a)? != 0 {
+        RxButton::Marker
+    } else {
+        RxButton::PowerSaver
+    })
+}
+
+pub fn set_rx_button(d: &mut Dev, b: RxButton) -> Result<RxButton> {
+    set_param(d, 0x0a, &[(b == RxButton::Marker) as u8])?;
+    refresh(d)?;
+    rx_button(d)
+}
+
+/// RØDE Central's "refresh" (`09 1a 00`): sent after every change and periodically. A setting written over
+/// the radio link (see [`radio_write`]) only reaches the transmitter after it.
+pub fn refresh(d: &mut Dev) -> Result<()> {
+    set_param(d, 0x1a, &[])?;
+    Ok(())
+}
+
+// --------------------------------------------------------------------------
+// Transmitter settings over the receiver's radio link (verified on hardware 2026-11-13).
+//
+// Report 9 `[0x0d, reg, value]` writes a register of the TX linked as TX1, `[0x0e, reg, value]` of TX2
+// (0x0e is not in RØDE Central's traffic — its capture had one TX — but tested: it reached TX2 only). Then
+// `09 1a 00` (refresh). It works with or without the TX on USB. Registers (values as on our units, several
+// are the reverse of what an earlier reverse-engineering project assumed):
+//   0x08 pad: 1 = normal, 0 = low-sensitivity pad      0x1a LEDs: 0xDF bright, 0xFE dim
+//   record mode + button, always written together, closed by 0x1e = 1 ("apply"):
+//   0x1b Always · 0x04 recording on (Always/Backup) · 0x21 Manual (button records) · 0x1d button = marker ·
+//   0x17 button active (Mute unless marker/record) · 0x18 1 = uncompressed (only used in Backup) · 0x1e 1
+// The TX clock register (0x06) didn't take on our units; clocks are set over USB.
+// --------------------------------------------------------------------------
+
+/// The report-9 opcode that writes to the TX in `slot` (1 or 2).
+pub fn radio_op(slot: u8) -> Option<u8> {
+    match slot {
+        1 => Some(0x0d),
+        2 => Some(0x0e),
+        _ => None,
+    }
+}
+
+/// Write one register of the TX linked in `slot` (without the refresh).
+pub fn radio_write(d: &mut Dev, slot: u8, reg: u8, value: u8) -> Result<()> {
+    let op = radio_op(slot).ok_or_else(|| Error::other("TX slot must be 1 or 2"))?;
+    transact(d, &[op, reg, value], SET_TIMEOUT, None)?;
+    Ok(())
+}
+
+/// The registers RØDE Central writes for a record mode, button function and recording format.
+pub fn radio_settings(rec: RecMode, button: ButtonMode, uncompressed: bool) -> [(u8, u8); 7] {
+    // Manual recording and the button's Record function go together
+    let manual = rec == RecMode::Button || button == ButtonMode::Record;
+    let rec = if manual { RecMode::Button } else { rec };
+    let button = match (manual, button) {
+        (true, _) => ButtonMode::Record,
+        (false, ButtonMode::Record) => ButtonMode::Mute,
+        (false, b) => b,
+    };
+    [
+        (0x1b, (rec == RecMode::Always) as u8),
+        (0x04, matches!(rec, RecMode::Always | RecMode::Backup) as u8),
+        (0x21, manual as u8),
+        (0x1d, (button == ButtonMode::Marker) as u8),
+        (0x17, (button != ButtonMode::None) as u8),
+        (0x18, uncompressed as u8),
+        (0x1e, 1),
+    ]
+}
+
+/// Set record mode, button function and recording format of the TX in `slot`, then refresh.
+pub fn radio_set_settings(
+    d: &mut Dev,
+    slot: u8,
+    rec: RecMode,
+    button: ButtonMode,
+    uncompressed: bool,
+) -> Result<()> {
+    for (reg, value) in radio_settings(rec, button, uncompressed) {
+        radio_write(d, slot, reg, value)?;
+    }
+    refresh(d)
+}
+
+pub fn radio_set_pad(d: &mut Dev, slot: u8, pad: bool) -> Result<()> {
+    radio_write(d, slot, 0x08, (!pad) as u8)?;
+    refresh(d)
+}
+
+pub const LED_BRIGHT: u8 = 0xDF;
+pub const LED_DIM: u8 = 0xFE;
+
+pub fn radio_set_led(d: &mut Dev, slot: u8, dim: bool) -> Result<()> {
+    radio_write(d, slot, 0x1a, if dim { LED_DIM } else { LED_BRIGHT })?;
+    refresh(d)
 }
 
 // Report 1 commands. Only the proven ones are here.
@@ -749,5 +888,44 @@ mod gain_tests {
         assert_eq!(g(COARSE_GAIN, 1).converted(FINE_GAIN), g(FINE_GAIN, 6)); // -12 → -12
         assert_eq!(g(COARSE_GAIN, 0).converted(FINE_GAIN), g(FINE_GAIN, 2)); // -24 → -24
         assert_eq!(g(FINE_GAIN, 3).converted(PRESET_GAIN), g(PRESET_GAIN, 0));
+    }
+}
+
+#[cfg(test)]
+mod radio_tests {
+    use super::*;
+
+    fn regs(rec: RecMode, button: ButtonMode, unc: bool) -> Vec<(u8, u8)> {
+        radio_settings(rec, button, unc).to_vec()
+    }
+
+    /// The sets as tested on the units on 2026-11-13 (registers 1b 04 21 1d 17 18 1e).
+    #[test]
+    fn settings_sets() {
+        use ButtonMode::*;
+        use RecMode::*;
+        let vals = |v: &[(u8, u8)]| v.iter().map(|(_, x)| *x).collect::<Vec<_>>();
+        assert_eq!(
+            regs(Off, Mute, true)
+                .iter()
+                .map(|(r, _)| *r)
+                .collect::<Vec<_>>(),
+            [0x1b, 0x04, 0x21, 0x1d, 0x17, 0x18, 0x1e]
+        );
+        assert_eq!(vals(&regs(Off, Mute, true)), [0, 0, 0, 0, 1, 1, 1]);
+        assert_eq!(vals(&regs(Off, None, true)), [0, 0, 0, 0, 0, 1, 1]);
+        assert_eq!(vals(&regs(Off, Marker, true)), [0, 0, 0, 1, 1, 1, 1]);
+        assert_eq!(vals(&regs(Always, Mute, true)), [1, 1, 0, 0, 1, 1, 1]);
+        assert_eq!(vals(&regs(Backup, Mute, false)), [0, 1, 0, 0, 1, 0, 1]);
+        // Manual and the Record button imply each other
+        assert_eq!(vals(&regs(Button, Mute, true)), [0, 0, 1, 0, 1, 1, 1]);
+        assert_eq!(vals(&regs(Always, Record, true)), [0, 0, 1, 0, 1, 1, 1]);
+    }
+
+    #[test]
+    fn radio_slots() {
+        assert_eq!(radio_op(1), Some(0x0d));
+        assert_eq!(radio_op(2), Some(0x0e));
+        assert_eq!(radio_op(3), None);
     }
 }
