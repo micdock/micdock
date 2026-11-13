@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.12.0
+
+- **Markers in the player:** the markers you set with the transmitter's Ø button show as ticks under the seek bar
+  and as a row of buttons (one per marker, with its time) to jump straight there; ⏮/⏭ jump to the previous or
+  next marker.
+- **Markers are kept when exporting:** as cue points in WAV files and as chapters in MP3 files, at the right place
+  when the ~31-minute pieces are joined. Exported WAVs played in MicDock show them too.
+- **Marker label file:** optionally (on by default) a `.txt` next to each export with markers, which Audacity
+  imports as a label track; `ugg2wav --labels` does the same.
+- `ugg2wav` says how many markers each output file has.
+- **Compressed recordings:** recordings made in the transmitter's compressed format (`.UGG` files with RØDE's own
+  ADPCM codec, which MicDock reported as "not an OggPCM stream") now play and export like the others. MicDock has
+  its own decoder for the format, bit-exact with RØDE's.
+
 ## 0.11.0
 
 - **Transmitter settings through the receiver:** record mode, Ø button, recording format (compressed or

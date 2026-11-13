@@ -20,6 +20,7 @@ impl Config {
             ("format", Value::from("wav")),
             ("mp3_preset", Value::from(1)),
             ("join", Value::from(true)),
+            ("labels", Value::from(true)),
             ("legacy_offset", Value::Null),
             ("warn_storage", Value::from(true)),
         ] {
@@ -36,6 +37,7 @@ impl Config {
             ("format", Value::from("wav")),
             ("mp3_preset", Value::from(1)),
             ("join", Value::from(true)),
+            ("labels", Value::from(true)),
             ("legacy_offset", Value::Null),
             ("warn_storage", Value::from(true)),
         ] {
@@ -91,6 +93,7 @@ mod tests {
         let mut c = Config::demo();
         assert_eq!(c.str("format"), "wav");
         assert!(c.bool("join"));
+        assert!(c.bool("labels"));
         assert_eq!(c.int("mp3_preset"), Some(1));
         assert_eq!(c.int("legacy_offset"), None);
         assert_eq!(c.str("export_dir"), "~/go2-recordings");

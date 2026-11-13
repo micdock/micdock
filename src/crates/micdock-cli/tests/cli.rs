@@ -33,7 +33,8 @@ fn tmp(name: &str) -> PathBuf {
 
 fn wav_samples(path: &Path) -> Vec<i32> {
     let b = std::fs::read(path).unwrap();
-    b[44..]
+    let len = u32::from_le_bytes(b[40..44].try_into().unwrap()) as usize;
+    b[44..44 + len]
         .as_chunks::<3>()
         .0
         .iter()
@@ -151,6 +152,39 @@ fn ugg2wav_joins_split_pieces() {
     let mut want = sa;
     want.extend(sb);
     assert_eq!(wav_samples(&out.join("REC00001-00002.wav")), want);
+    std::fs::remove_dir_all(d).unwrap();
+}
+
+#[test]
+fn ugg2wav_keeps_markers_and_writes_labels() {
+    let d = tmp("labels");
+    let (a, b) = (d.join("REC00001.WAV"), d.join("REC00002.WAV"));
+    // a full 30-minute piece is too big for a test: export them separately
+    write_wav(&a, &samples(4800, 1), &[2400], 100.0);
+    write_wav(&b, &samples(4800, 2), &[], 200.0);
+    let out = d.join("out");
+    let o = run(
+        "ugg2wav",
+        &[
+            "--clock",
+            "none",
+            "--labels",
+            "-o",
+            out.to_str().unwrap(),
+            a.to_str().unwrap(),
+            b.to_str().unwrap(),
+        ],
+    );
+    assert!(o.status.success(), "{}", text(&o));
+    assert!(text(&o).contains("1 marker"), "{}", text(&o));
+    let labels = std::fs::read_to_string(out.join("REC00001.txt")).unwrap();
+    assert_eq!(labels, "0.050000\t0.050000\tMarker 1\n");
+    assert!(
+        !out.join("REC00002.txt").exists(),
+        "no markers, no label file"
+    );
+    let r = micdock_core::recordings::open_recording(out.join("REC00001.wav")).unwrap();
+    assert_eq!(r.markers, vec![2400], "cue points in the WAV");
     std::fs::remove_dir_all(d).unwrap();
 }
 

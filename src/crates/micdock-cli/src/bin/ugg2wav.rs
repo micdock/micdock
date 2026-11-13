@@ -16,6 +16,10 @@ Convert RØDE Wireless GO II on-board recordings (RECxxxxx.UGG / RECxxxxx.WAV) t
 --mp3 pipes the raw PCM into ffmpeg (libmp3lame), so ffmpeg must be installed.
 --join writes one file per recording session instead of one per file.
 
+Markers set with the transmitter's button are kept: as cue points in WAV files and as chapters in
+MP3 files (shifted to the right place when pieces are joined). --labels also writes them to a .txt
+next to each output file, which Audacity imports as a label track (File > Import > Labels).
+
 Dates: the TX stamps files with its own clock (param 0x01, u32 seconds), which counts from
 2000-01-01 if nobody ever set it. With --clock auto (the default) we read the TX clock over HID,
 take offset = real_now - tx_now and add it to each file's date. That is only right if the clock
@@ -42,6 +46,9 @@ struct Cli {
     /// one output file per recording session (joins the ~31-minute splits)
     #[arg(long)]
     join: bool,
+    /// also write the markers to an Audacity label file (.txt) next to each output file
+    #[arg(long)]
+    labels: bool,
     /// date correction: 'auto' (read TX clock), 'none', or an offset in seconds
     #[arg(long, default_value = "auto", allow_hyphen_values = true)]
     clock: String,
@@ -156,6 +163,13 @@ fn main() -> ExitCode {
                 continue;
             }
         };
+        let marks = recordings::joined_markers(&grp).len();
+        if a.labels {
+            if let Err(e) = recordings::write_labels(&grp, &dst) {
+                eprintln!("FAIL {}: {e}", recordings::label_path(&dst).display());
+                rc = ExitCode::FAILURE;
+            }
+        }
         let s = frames as f64 / first.rate as f64;
         let when = match chrono::Local.timestamp_opt(start.floor() as i64, 0) {
             chrono::LocalResult::Single(d) | chrono::LocalResult::Ambiguous(d, _) => {
@@ -169,14 +183,19 @@ fn main() -> ExitCode {
             .collect::<Vec<_>>()
             .join(", ");
         println!(
-            "{names} -> {}  {when}  {}:{:02}:{:02}  {} Hz {}-bit {}ch",
+            "{names} -> {}  {when}  {}:{:02}:{:02}  {} Hz {}-bit {}ch{}",
             dst.display(),
             (s / 3600.0).floor() as u64,
             ((s % 3600.0) / 60.0).floor() as u64,
             (s % 60.0).floor() as u64,
             first.rate,
             first.bits,
-            first.channels
+            first.channels,
+            match marks {
+                0 => String::new(),
+                1 => "  1 marker".into(),
+                n => format!("  {n} markers"),
+            }
         );
     }
     rc

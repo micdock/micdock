@@ -4,8 +4,9 @@
 
 MicDock does on Linux what RØDE's own apps do for the Wireless GO II:
 
-- copy the transmitters' on-board recordings (`.WAV` and older `.UGG`) with correct dates, play them, and
-  export them to WAV or MP3, joining the ~31-minute pieces of a long recording;
+- copy the transmitters' on-board recordings (`.WAV` and older `.UGG`) with correct dates, play them (jumping
+  from marker to marker), and export them to WAV or MP3, joining the ~31-minute pieces of a long recording and
+  keeping the markers (WAV cue points, MP3 chapters, optionally an Audacity label file);
 - set the on-board record mode (Always / Manual / Backup / Off), the Ø button (Mute / Marker / Record / None),
   the recording format, the LED brightness and the low-sensitivity pad — over USB or through the receiver, so a
   transmitter doesn't even have to be connected;
@@ -80,7 +81,7 @@ rodego2 --dev /dev/hidrawN rxbutton [powersaver|marker]            # RX Ø butto
 rodego2 --dev /dev/hidrawN radio 1 [--led dim] [--pad on] [--rec backup] [--format compressed]  # a TX via the RX
 rodego2 --dev /dev/hidrawN scan               # read-only dump of all parameters
 rodego2 --dev /dev/hidrawN erase              # TX: delete ALL recordings (asks first; irreversible)
-ugg2wav [--mp3] [--join] -o ~/go2-recordings /media/$USER/<drive>/REC*
+ugg2wav [--mp3] [--join] [--labels] -o ~/go2-recordings /media/$USER/<drive>/REC*
 micdock-firmware check|download|plan tx|install tx
 ```
 

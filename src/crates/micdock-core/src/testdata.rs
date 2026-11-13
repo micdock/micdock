@@ -17,8 +17,8 @@ pub const RATE: u32 = 48000;
 
 /// `n` samples of a quiet 24-bit test signal (different for each `seed`).
 pub fn samples(n: usize, seed: i32) -> Vec<i32> {
-    (0..n as i32)
-        .map(|i| ((i * 7919 + seed * 104_729) % 600_000) - 300_000)
+    (0..n as i64)
+        .map(|i| (((i * 7919 + seed as i64 * 104_729) % 600_000) - 300_000) as i32)
         .collect()
 }
 
@@ -124,5 +124,60 @@ pub fn write_ugg(path: &Path, first_gp: i64, samples: &[i32], mtime: f64) {
         ));
     }
     std::fs::write(path, f).expect("write ugg");
+    set_mtime(path, mtime);
+}
+
+/// A synthetic compressed (RODEC) stream: `packets` Ogg packets of five 49-byte frames, with pseudo-random
+/// step indexes and codes around the middle, starting at a block boundary. Its decoded output is checked
+/// against RØDE's own decoder in `rodec`'s tests.
+pub fn rodec_packets(packets: usize) -> Vec<Vec<u8>> {
+    let mut r: u32 = 0x1234_5678;
+    let mut next = move || {
+        r ^= r << 13;
+        r ^= r >> 17;
+        r ^= r << 5;
+        r
+    };
+    (0..packets)
+        .map(|p| {
+            let mut pk = Vec::with_capacity(245);
+            for f in 0..5 {
+                pk.push(if p == 0 && f == 0 {
+                    0x80
+                } else {
+                    (20 + next() % 70) as u8
+                });
+                for _ in 0..48 {
+                    let lo = 6 + next() % 5;
+                    let hi = 6 + next() % 5;
+                    pk.push((lo | hi << 4) as u8);
+                }
+            }
+            pk
+        })
+        .collect()
+}
+
+/// A compressed UGG recording like the transmitter writes it: page 0 with the RODEC header and the comment,
+/// then pages of 16 packets (7680 samples) closed by an empty packet. The granule starts at `first_gp`.
+pub fn write_rodec_ugg(path: &Path, first_gp: i64, packets: &[Vec<u8>], mtime: f64) {
+    let mut head = b"RODEC   ".to_vec();
+    head.extend([1, 0, 0, 0, 0, 0, 0, 0]);
+    head.extend(RATE.to_le_bytes());
+    head.extend(1u16.to_le_bytes());
+    head.extend(30u16.to_le_bytes());
+    head.extend([0, 0, 0]);
+    let comment = b"vorbisRODE Wireless GO II v\x02\x05\x00\x00";
+    let mut f = ogg_page(0, 0, 2, &[&head, comment]);
+    let mut gp = first_gp;
+    let pages: Vec<&[Vec<u8>]> = packets.chunks(16).collect();
+    for (i, page) in pages.iter().enumerate() {
+        gp += page.len() as i64 * 480;
+        let mut list: Vec<&[u8]> = page.iter().map(|p| &p[..]).collect();
+        list.push(&[]);
+        let last = i + 1 == pages.len();
+        f.extend(ogg_page(gp, i as u32 + 1, if last { 4 } else { 0 }, &list));
+    }
+    std::fs::write(path, f).expect("write rodec ugg");
     set_mtime(path, mtime);
 }

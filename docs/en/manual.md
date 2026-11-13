@@ -98,7 +98,12 @@ file type and markers (when you used the Ø button as *Marker*). A recording tha
 31-minute files is shown as one line.
 
 **Playing:** a WAV recording plays straight from the transmitter; an older UGG recording is first converted
-(that takes a moment). The player bar above the list shows where the markers are.
+(that takes a moment).
+
+**Markers:** when a recording has markers (the Ø button set to *Marker*), the player bar shows them as small ticks
+under the seek bar and as a row of buttons, one per marker with its time; click one to jump there. The button of
+the part you are listening to is highlighted. **⏮** and **⏭** next to the seek bar jump to the previous and next
+marker; **⏮** within two seconds after a marker goes to the one before it, like a music player's "previous".
 
 **Dates:** the transmitter stamps its files with its own clock. If that clock was never set, MicDock works out
 the correct dates while the transmitter is connected and remembers the correction for those older recordings.
@@ -110,6 +115,13 @@ the correct dates while the transmitter is connected and remembers the correctio
   (this needs `ffmpeg`).
 - **Quality:** the MP3 quality. *VBR good* suits speech and most recordings.
 - **Join split files:** write one file per recording instead of one per 31-minute piece.
+- **Marker label file:** also write the markers to a `.txt` file next to each exported file (only for
+  recordings with markers). In Audacity, *File → Import → Labels…* shows them as a label track.
+
+Markers are always kept in the exported file itself: as cue points in a WAV file (shown by audio editors such as
+Audacity, REAPER, Ocenaudio and Adobe Audition) and as chapters in an MP3 file (shown by podcast players and
+media players that support chapters). In a joined export the markers of every piece are at the right place. They
+are named *Marker 1*, *Marker 2*, …; an MP3 gets an extra chapter *Start* for the part before the first marker.
 
 Click **Export**. A progress bar shows how far it is; **Cancel** stops it. The files are named after the date and time the recording started, for example
 `2026-11-07 09.30 REC00051-REC00053.wav`, and keep that date. Files that already exist are skipped, so you can
@@ -124,7 +136,11 @@ the recordings you want to keep first. The transmitter may restart for a moment 
 Single recordings can't be deleted: the transmitter protects its drive against changes from the computer and
 only offers to delete everything at once (RØDE's own app works the same way).
 
-File types: firmware 2.50 and later records `.WAV` files; older firmware wrote `.UGG` files. MicDock reads both.
+File types: firmware 2.50 and later records `.WAV` files; older firmware wrote `.UGG` files. Recordings made
+with **Recording format: Compressed** (see [LEDs and recording format](#leds-and-recording-format-transmitters))
+are also `.UGG` files, shown as *UGG, compressed* in the list. MicDock reads all of them: compressed recordings are
+decoded while playing or exporting (that takes a few seconds for a long recording) and exported as normal 24-bit
+WAV or MP3 files.
 The `.EGG` files on the drive hold waveform previews for RØDE's app and can be ignored.
 
 ## The receiver
@@ -255,7 +271,11 @@ MicDock installs commands for scripts and terminals. Close MicDock while you use
 ugg2wav -o ~/go2-recordings /media/$USER/<drive>/REC*.WAV
 # MP3, with the pieces of each recording joined
 ugg2wav --mp3 --join -o ~/go2-recordings /media/$USER/<drive>/REC*
+# also write each file's markers to an Audacity label file (.txt)
+ugg2wav --join --labels -o ~/go2-recordings /media/$USER/<drive>/REC*.WAV
 ```
+
+Markers are kept the same way as in the app: cue points in WAV, chapters in MP3.
 
 **`rodego2`** talks to a unit directly. Find the unit's `/dev/hidrawN` with `rodego2 list` first:
 

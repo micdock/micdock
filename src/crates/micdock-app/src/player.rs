@@ -73,7 +73,8 @@ impl Player {
     /// Start playing these WAV recordings back to back from the beginning.
     pub fn start(infos: &[Recording]) -> Result<Player, String> {
         let mut segs = Vec::new();
-        let mut markers = Vec::new();
+        let mut markers = micdock_core::recordings::joined_markers(infos);
+        markers.sort_unstable();
         let mut start = 0;
         for r in infos {
             let Container::Wav { data_offset, .. } = r.container else {
@@ -82,7 +83,6 @@ impl Player {
             if !matches!(r.width, 2..=4) {
                 return Err(format!("{}: {}-bit audio is not supported", r.name, r.bits));
             }
-            markers.extend(r.markers.iter().map(|&m| start + m as u64));
             segs.push(Segment {
                 path: r.path.clone(),
                 offset: data_offset,
@@ -149,6 +149,16 @@ impl Player {
         self.shared.paused.store(paused, Ordering::Relaxed);
     }
 
+    /// Where "previous marker" jumps to from `pos`: see [`prev_marker`].
+    pub fn prev_marker(&self, pos: u64) -> u64 {
+        prev_marker(&self.markers, pos, self.rate)
+    }
+
+    /// Where "next marker" jumps to from `pos`, if there is a marker after it.
+    pub fn next_marker(&self, pos: u64) -> Option<u64> {
+        self.markers.iter().copied().find(|&m| m > pos)
+    }
+
     pub fn seek(&self, frame: u64) {
         let frame = frame.min(self.total);
         self.shared.finished.store(false, Ordering::Relaxed);
@@ -159,6 +169,18 @@ impl Player {
 }
 
 /// Decode `n` frames of little-endian signed PCM (first channel only) to f32.
+/// The last marker more than 2 seconds before `pos` (so pressing again keeps going back, like a
+/// music player's "previous"), or the start. `markers` must be sorted.
+pub fn prev_marker(markers: &[u64], pos: u64, rate: u32) -> u64 {
+    let limit = pos.saturating_sub(2 * rate as u64);
+    markers
+        .iter()
+        .copied()
+        .rev()
+        .find(|&m| m < limit)
+        .unwrap_or(0)
+}
+
 fn decode(buf: &[u8], frame_bytes: usize, width: usize, out: &mut Vec<f32>) {
     let scale = 1.0 / (1u64 << (width * 8 - 1)) as f32;
     for f in buf.chunks_exact(frame_bytes) {
@@ -393,6 +415,21 @@ mod tests {
     use super::*;
 
     /// Plays a generated 1 s tone on the real output device: run with `--ignored` on a desktop.
+    #[test]
+    fn previous_marker_goes_back_past_a_just_passed_one() {
+        let m = [48_000, 480_000];
+        assert_eq!(prev_marker(&m, 0, 48000), 0);
+        assert_eq!(
+            prev_marker(&m, 500_000, 48000),
+            48_000,
+            "just past a marker: the one before it"
+        );
+        assert_eq!(prev_marker(&m, 600_000, 48000), 480_000);
+        assert_eq!(prev_marker(&m, 120_000, 48000), 0);
+        assert_eq!(prev_marker(&m, 150_000, 48000), 48_000);
+        assert_eq!(prev_marker(&[], 150_000, 48000), 0);
+    }
+
     #[test]
     #[ignore]
     fn plays_and_seeks() {
